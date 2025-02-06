@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,35 +11,31 @@ import (
 )
 
 func main() {
-	port := getPortFromArgs()
-	key := getKeyFromArgs()
+	port, key := parseArgs()
 	addr := fmt.Sprintf(":%d", port)
 
 	fmt.Printf("Go Server is listening on http://localhost%s\n", addr)
 
 	err := http.ListenAndServe(addr, http.HandlerFunc(gospace.GetRouter(key)))
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
+		os.Exit(1)
 	}
 }
 
-func getPortFromArgs() int {
+func parseArgs() (int, string) {
 	defaultPort := 6060
-	if len(os.Args) > 1 {
-		port, err := strconv.Atoi(os.Args[1])
-		if err != nil {
-			fmt.Println("invalid port provided. using default port:", defaultPort)
-			return defaultPort
-		}
-		return port
-	}
-	return defaultPort
-}
+	defaultKey := "default"
 
-func getKeyFromArgs() string {
-	if len(os.Args) > 2 {
-		return os.Args[2]
+	portPtr := flag.Int("port", defaultPort, "Port for the server to listen on")
+	keyPtr := flag.String("key", defaultKey, "Key that determines which router to run from gospace")
+
+	flag.Parse()
+
+	if *portPtr <= 0 || *portPtr > 65535 {
+		fmt.Fprintf(os.Stderr, "Invalid port: %d. Using default port: %d\n", *portPtr, defaultPort)
+		*portPtr = defaultPort
 	}
-	fmt.Println("no key provided. using default key: 'default'")
-	return "default"
+
+	return *portPtr, *keyPtr
 }
