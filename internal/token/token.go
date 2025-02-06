@@ -1,12 +1,12 @@
-package gauth
+package token
 
 import (
-  "context"
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-  "encoding/json"
 
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/idtoken"
@@ -23,12 +23,12 @@ func newMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", rootHandler)
 	mux.HandleFunc("/id", idTokenHandler)
-  mux.HandleFunc("/access", accessTokenHandler)
+	mux.HandleFunc("/access", accessTokenHandler)
 	return mux
 }
 
 func rootHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "gauth service is running at /")
+	fmt.Fprintf(w, "token service is running at /")
 }
 func idTokenHandler(w http.ResponseWriter, r *http.Request) {
 	url := os.Getenv("ID_TOKEN_SOURCE_URL")
