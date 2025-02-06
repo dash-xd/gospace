@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/dash-xd/gospace/internal/util"
+	"github.com/dash-xd/gospace/internal/token"
 )
 
 type Fn func(http.ResponseWriter, *http.Request)
