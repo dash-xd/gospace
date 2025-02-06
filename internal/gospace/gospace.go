@@ -4,7 +4,6 @@ import (
 	"net/http"
 
 	"github.com/dash-xd/gospace/internal/util"
-	"github.com/dash-xd/gospace/internal/token"
 )
 
 type Fn func(http.ResponseWriter, *http.Request)
@@ -17,6 +16,7 @@ func RegisterFunc(pkg string, fn Fn) {
 
 func init() {
 	RegisterFunc("util", util.Main)
+	RegisterFunc("token", util.Main)
 }
 
 func GetRouter(key string) Fn {
