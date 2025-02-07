@@ -1,0 +1,12 @@
+services:
+  goapp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gospace_container
+    ports:
+      - "${HOST_PORTS:-6060-8999}:6060-8999"  # Map a range of ports for dynamic routers
+    environment:
+      - APP_PORT=6060
+    volumes:
+      - ./gospace:/app  # Mount local gospace directory into the container

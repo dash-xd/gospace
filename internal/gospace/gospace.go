@@ -3,6 +3,8 @@ package gospace
 import (
 	"net/http"
 
+	"github.com/dash-xd/gospace/internal/serve"
+	"github.com/dash-xd/gospace/internal/token"
 	"github.com/dash-xd/gospace/internal/util"
 )
 
@@ -16,7 +18,8 @@ func RegisterFunc(pkg string, fn Fn) {
 
 func init() {
 	RegisterFunc("util", util.Main)
-	RegisterFunc("token", util.Main)
+	RegisterFunc("token", token.Main)
+	RegisterFunc("serve", serve.Main)
 }
 
 func GetRouter(key string) Fn {

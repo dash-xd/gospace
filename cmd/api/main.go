@@ -23,7 +23,7 @@ func main() {
 }
 
 func parseArgs() (int, string) {
-	defaultPort := 6060
+	defaultPort := 8081
 	defaultKey := "default"
 
 	portPtr := flag.Int("port", defaultPort, "Port for the server to listen on")

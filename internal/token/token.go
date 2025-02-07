@@ -30,6 +30,7 @@ func newMux() *http.ServeMux {
 func rootHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "token service is running at /")
 }
+
 func idTokenHandler(w http.ResponseWriter, r *http.Request) {
 	url := os.Getenv("ID_TOKEN_SOURCE_URL")
 
