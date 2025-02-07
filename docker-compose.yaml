@@ -9,4 +9,4 @@ services:
       - "6061-8900:6061-8900"
     volumes:
       - ./gospace:/app
-    entrypoint: ["/usr/local/bin/gospace", "-port", "${SERVE_PORT}", "-key", "serve"]
+    entrypoint: ["/usr/local/bin/gospace", "-port", "${SERVE_PORT:-6060}", "-key", "serve"]
