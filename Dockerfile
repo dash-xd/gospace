@@ -1,17 +1,21 @@
-# Use the prebuilt Go Alpine image
+# Use the prebuilt Go Alpine image for building
 FROM golang:1.23.6-alpine3.21 AS builder
 
 # Install necessary dependencies
 RUN apk add --no-cache ca-certificates
 
-# Set the working directory
+# Set the working directory for Go modules
 WORKDIR /app
 
-# Copy the local gospace directory into the container
-COPY gospace /app
+# Copy only go.mod and go.sum first (better caching)
+COPY gospace/go.mod gospace/go.sum /app/gospace/
 
-# Download dependencies
+# Download dependencies early to leverage Docker layer caching
+WORKDIR /app/gospace
 RUN go mod tidy
+
+# Copy the rest of the application source
+COPY gospace /app/gospace
 
 # Build the application
 RUN go build -o gospace ./cmd/api/main.go
@@ -26,19 +30,9 @@ RUN apk add --no-cache ca-certificates
 RUN addgroup -S goapp && adduser -S goapp -G goapp
 
 # Copy the built Go binary from the builder stage
-COPY --from=builder /app/gospace /usr/local/bin/gospace
+COPY --from=builder /app/gospace/gospace /usr/local/bin/gospace
 
-# Change ownership of the Redis socket directory (shared volume)
 RUN mkdir -p /var/run/redis && chown goapp:goapp /var/run/redis
 
 # Switch to non-root user
 USER goapp
-
-# Set the default port to 6060
-ENV APP_PORT=6060
-
-# Expose the internal Go application port (to be mapped in docker-compose)
-EXPOSE 6060
-
-# Run the Go application with a dynamic port
-ENTRYPOINT ["/usr/local/bin/gospace"]
