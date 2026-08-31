@@ -58,9 +58,11 @@ Each request gets a fresh WASM module instance from one compiled module. This ke
 
 The Wazero runtime is configured with request-context cancellation and a memory-page cap. The WASM guest receives no filesystem or network capability from gospace by default.
 
+The version-one WASM HTTP bridge is intentionally buffered: request and response bodies cross the guest boundary as complete byte slices. Ordinary routing, JSON APIs, middleware, headers, status codes, and request bodies work, but streaming-only `net/http` capabilities such as `http.Flusher`, connection hijacking/WebSockets, and SSE are not exposed to WASM routers yet. Native pre-registered routers remain ordinary Go handlers and retain the capabilities supplied by the underlying runtime.
+
 ## Build the Chi example
 
-Go 1.24 or newer is required to build Go WASI reactors using `go:wasmexport` and `-buildmode=c-shared`.
+The full worker and example use Go 1.26, matching the managed Gen 2 `go126` runtime and the current Wazero dependency floor.
 
 ```sh
 cd examples/wasm-chi
