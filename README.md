@@ -43,12 +43,15 @@ The checked-in worker pre-registers the existing `util` and `token` routers. Reg
 
 ## WASM router contract
 
-A WASM router is a Go WASI reactor that exports two low-level functions:
+A WASM router is a Go WASI reactor that exports three low-level functions:
 
 - `gospace_alloc(size uint32) unsafe.Pointer`
-- `gospace_handle() uint64`
+- `gospace_handle() unsafe.Pointer`
+- `gospace_response_len() uint32`
 
 This is the gospace WASM application binary interface (ABI). That use of “ABI” is unrelated to the name Huram Abi in the surrounding project family; Huram Abi refers to the master-builder name/title, not the computing acronym.
+
+The pointer-bearing exports deliberately use `unsafe.Pointer` rather than manually converting Go pointers to integers. Go's `go:wasmexport` calling convention translates `unsafe.Pointer` to the WebAssembly host's `i32` linear-memory offset.
 
 Router authors do not implement the wire protocol themselves. `wasmguest` adapts an ordinary `net/http.Handler` to those exports, so the application can still use Chi, `http.ServeMux`, middleware, and normal Go handler code.
 
