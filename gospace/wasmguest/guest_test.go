@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"unsafe"
 
 	"github.com/dash-xd/gospace/wasmhttp"
 )
@@ -45,8 +46,8 @@ func TestHandleAdaptsServeMux(t *testing.T) {
 	if response.Status != http.StatusCreated {
 		t.Fatalf("status = %d, want %d", response.Status, http.StatusCreated)
 	}
-	if got := response.Header.Get("X-Router"); got != "mux" {
-		t.Fatalf("X-Router = %q, want mux", got)
+	if values := response.Header["X-Router"]; len(values) != 1 || values[0] != "mux" {
+		t.Fatalf("X-Router = %v, want [mux]", values)
 	}
 	if got := string(response.Body); got != "42" {
 		t.Fatalf("body = %q, want 42", got)
