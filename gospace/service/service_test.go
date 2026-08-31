@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -36,6 +37,13 @@ func TestRegisteredRouterCanBeActivated(t *testing.T) {
 	}
 	if got := response.Body.String(); got != "hello" {
 		t.Fatalf("body = %q, want hello", got)
+	}
+}
+
+func TestRegisterWASMUsesServiceModuleLimit(t *testing.T) {
+	s := NewWithOptions(Options{MaxWASMBytes: 4})
+	if _, err := s.RegisterWASM(context.Background(), "bundled-v1", make([]byte, 5)); err == nil {
+		t.Fatal("RegisterWASM accepted module larger than service limit")
 	}
 }
 
