@@ -8,7 +8,10 @@ import (
 	"sync/atomic"
 )
 
-var ErrUnknownRouter = errors.New("unknown router")
+var (
+	ErrUnknownRouter = errors.New("unknown router")
+	ErrRouterExists  = errors.New("router already registered")
+)
 
 type activeHandler struct {
 	name    string
@@ -28,14 +31,20 @@ func NewWorker() *Worker {
 	return &Worker{handlers: make(map[string]http.Handler)}
 }
 
+// Register publishes an immutable named handler. Router names are intentionally
+// not overwritten: versioned registrations avoid closing or mutating a handler
+// that may still be serving an in-flight request.
 func (w *Worker) Register(name string, handler http.Handler) error {
 	if name == "" || handler == nil {
 		return errors.New("router name and handler are required")
 	}
 
 	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, exists := w.handlers[name]; exists {
+		return ErrRouterExists
+	}
 	w.handlers[name] = handler
-	w.mu.Unlock()
 	return nil
 }
 
@@ -60,7 +69,6 @@ func (w *Worker) Activate(name string) error {
 	return nil
 }
 
-// RegisterAndActivate publishes a handler and atomically makes it active.
 func (w *Worker) RegisterAndActivate(name string, handler http.Handler) error {
 	if err := w.Register(name, handler); err != nil {
 		return err
