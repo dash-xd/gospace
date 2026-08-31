@@ -1,6 +1,7 @@
 package router
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -28,6 +29,17 @@ func TestWorkerActivation(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertBody(t, w, "b")
+}
+
+func TestWorkerRejectsDuplicateRegistration(t *testing.T) {
+	w := NewWorker()
+	h := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	if err := w.Register("router-v1", h); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Register("router-v1", h); !errors.Is(err, ErrRouterExists) {
+		t.Fatalf("duplicate registration error = %v, want %v", err, ErrRouterExists)
+	}
 }
 
 func TestWorkerWithoutActiveRouter(t *testing.T) {
