@@ -3,12 +3,14 @@ package service
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/dash-xd/gospace/router"
@@ -16,18 +18,37 @@ import (
 )
 
 const (
-	ControlPrefix = "/_gospace/"
-	defaultMaxWASM = 32 << 20
+	ControlPrefix      = "/_gospace/"
+	ControlTokenHeader = "X-Gospace-Control-Token"
+	defaultMaxWASM     = 32 << 20
 )
 
+type Options struct {
+	ControlToken string
+	MaxWASMBytes int64
+}
+
 type Service struct {
-	worker  *router.Worker
-	control *http.ServeMux
-	maxWASM int64
+	worker       *router.Worker
+	control      *http.ServeMux
+	controlToken string
+	maxWASM      int64
 }
 
 func New() *Service {
-	s := &Service{worker: router.NewWorker(), maxWASM: defaultMaxWASM}
+	return NewWithOptions(Options{ControlToken: os.Getenv("GOSPACE_CONTROL_TOKEN")})
+}
+
+func NewWithOptions(options Options) *Service {
+	if options.MaxWASMBytes <= 0 {
+		options.MaxWASMBytes = defaultMaxWASM
+	}
+
+	s := &Service{
+		worker:       router.NewWorker(),
+		controlToken: options.ControlToken,
+		maxWASM:      options.MaxWASMBytes,
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /_gospace/routers", s.listRouters)
 	mux.HandleFunc("POST /_gospace/activate/{name}", s.activateRouter)
@@ -50,6 +71,9 @@ func (s *Service) Activate(name string) error {
 
 func (s *Service) Active() string { return s.worker.Active() }
 
+// LoadWASM registers a WASM-backed http.Handler directly. This API does not
+// depend on the HTTP control plane and is suitable for an authenticated control
+// path that already has the module bytes.
 func (s *Service) LoadWASM(ctx context.Context, name string, module []byte, activate bool) (string, error) {
 	if name == "" {
 		return "", errors.New("router name is required")
@@ -73,10 +97,27 @@ func (s *Service) LoadWASM(ctx context.Context, name string, module []byte, acti
 
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, ControlPrefix) {
+		if !s.authorizeControl(r) {
+			// Leave the privileged surface undiscoverable when runtime control is
+			// disabled or the caller does not possess the separate control token.
+			http.NotFound(w, r)
+			return
+		}
 		s.control.ServeHTTP(w, r)
 		return
 	}
 	s.worker.ServeHTTP(w, r)
+}
+
+func (s *Service) authorizeControl(r *http.Request) bool {
+	if s.controlToken == "" {
+		return false
+	}
+	provided := r.Header.Get(ControlTokenHeader)
+	if len(provided) != len(s.controlToken) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(s.controlToken)) == 1
 }
 
 func (s *Service) listRouters(w http.ResponseWriter, _ *http.Request) {
@@ -114,13 +155,17 @@ func (s *Service) loadWASM(w http.ResponseWriter, r *http.Request) {
 	activate := r.URL.Query().Get("activate") == "true"
 	digest, err := s.LoadWASM(r.Context(), name, module, activate)
 	if err != nil {
+		if errors.Is(err, router.ErrRouterExists) {
+			http.Error(w, "router name already registered; use an immutable/versioned name", http.StatusConflict)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"name":     name,
-		"sha256":   digest,
-		"active":   activate,
+		"name":      name,
+		"sha256":    digest,
+		"active":    activate,
 		"sizeBytes": len(module),
 	})
 }
