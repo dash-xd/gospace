@@ -28,15 +28,13 @@ func TestHandleAdaptsServeMux(t *testing.T) {
 	}
 	input = encoded
 
-	packed := Handle(mux)
-	ptr, size := uint32(packed>>32), uint32(packed)
-	if size == 0 {
+	ptr := Handle(mux)
+	size := ResponseLen()
+	if ptr == nil || size == 0 {
 		t.Fatal("empty encoded response")
 	}
-
-	base := uint32(uintptr(unsafe.Pointer(&output[0])))
-	if ptr != base {
-		t.Fatalf("response pointer = %d, want %d", ptr, base)
+	if ptr != unsafe.Pointer(&output[0]) {
+		t.Fatal("response pointer does not reference output buffer")
 	}
 
 	var response wasmhttp.Response
