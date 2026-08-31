@@ -27,8 +27,13 @@ func gospaceAlloc(size uint32) unsafe.Pointer {
 }
 
 //go:wasmexport gospace_handle
-func gospaceHandle() uint64 {
+func gospaceHandle() unsafe.Pointer {
 	return wasmguest.Handle(handler)
+}
+
+//go:wasmexport gospace_response_len
+func gospaceResponseLen() uint32 {
+	return wasmguest.ResponseLen()
 }
 
 func main() {}
