@@ -12,8 +12,14 @@ import (
 type Fn func(http.ResponseWriter, *http.Request)
 
 func init() {
-	_ = registry.RegisterFunc("util", util.Main)
-	_ = registry.RegisterFunc("token", token.Main)
+	mustRegister("util", util.Main)
+	mustRegister("token", token.Main)
+}
+
+func mustRegister(name string, fn func(http.ResponseWriter, *http.Request)) {
+	if err := registry.RegisterFunc(name, fn); err != nil {
+		panic(err)
+	}
 }
 
 func Main(w http.ResponseWriter, r *http.Request) {
