@@ -65,16 +65,11 @@ func (s *Service) RegisterFunc(name string, fn func(http.ResponseWriter, *http.R
 	return s.worker.RegisterFunc(name, fn)
 }
 
-func (s *Service) Activate(name string) error {
-	return s.worker.Activate(name)
-}
-
-func (s *Service) Active() string { return s.worker.Active() }
-
-// LoadWASM registers a WASM-backed http.Handler directly. This API does not
-// depend on the HTTP control plane and is suitable for an authenticated control
-// path that already has the module bytes.
-func (s *Service) LoadWASM(ctx context.Context, name string, module []byte, activate bool) (string, error) {
+// RegisterWASM compiles module bytes and registers the resulting WASM-backed
+// http.Handler without activating it. This is the WASM equivalent of Register:
+// callers may invoke it during package initialization for modules bundled with
+// the deployment, or later for modules resolved dynamically at runtime.
+func (s *Service) RegisterWASM(ctx context.Context, name string, module []byte) (string, error) {
 	if name == "" {
 		return "", errors.New("router name is required")
 	}
@@ -90,13 +85,32 @@ func (s *Service) LoadWASM(ctx context.Context, name string, module []byte, acti
 		_ = h.Close()
 		return "", err
 	}
+
+	sum := sha256.Sum256(module)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func (s *Service) Activate(name string) error {
+	return s.worker.Activate(name)
+}
+
+func (s *Service) Active() string { return s.worker.Active() }
+
+// LoadWASM is the runtime convenience operation: register a WASM router and,
+// optionally, atomically activate it. The registration mechanism is identical
+// to RegisterWASM; "hotload" describes when the bytes arrive, not a different
+// class of router inside the worker.
+func (s *Service) LoadWASM(ctx context.Context, name string, module []byte, activate bool) (string, error) {
+	digest, err := s.RegisterWASM(ctx, name, module)
+	if err != nil {
+		return "", err
+	}
 	if activate {
 		if err := s.worker.Activate(name); err != nil {
 			return "", err
 		}
 	}
-	sum := sha256.Sum256(module)
-	return hex.EncodeToString(sum[:]), nil
+	return digest, nil
 }
 
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
