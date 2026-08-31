@@ -2,12 +2,15 @@
 
 `gospace` is a modular Go HTTP worker shell for Google Cloud Functions Gen 2 and ordinary `net/http` servers.
 
-The process registers one stable native `http.Handler`. That handler can dispatch to either:
+The process registers one stable native `http.Handler`. That handler can dispatch to any of three equivalent registry sources:
 
-- native Go routers compiled into the function and registered ahead of time; or
-- WebAssembly routers loaded into the already-running worker.
+- native Go routers compiled into the function and registered ahead of time;
+- WASM routers bundled with the deployment and pre-registered ahead of time; or
+- WASM routers resolved and registered dynamically by an already-running worker.
 
-The WASM path does not replace the Functions Framework handler, start a subprocess, or call another service. Hotloading creates a WASM-backed adapter that itself implements `http.Handler`; the already-registered worker handler atomically delegates subsequent requests to that adapter.
+The WASM path does not replace the Functions Framework handler, start a subprocess, or call another service. A WASM module is wrapped in a native adapter that itself implements `http.Handler`; the already-registered worker handler atomically delegates requests to whichever registered router is active.
+
+The distinction between pre-registration and hot/lazy loading is therefore only *when the WASM bytes become available*. Once registered, both are the same kind of WASM-backed `http.Handler` inside the worker.
 
 ## Native router registration
 
@@ -40,6 +43,33 @@ func newRouter() http.Handler {
 The package still has to be imported by the Go source being built. This is the normal build-time composition path and is appropriate when the managed Gen 2 buildpack is already compiling the uploaded working directory or source bucket.
 
 The checked-in worker pre-registers the existing `util` and `token` routers. Registrations are immutable: use a new/versioned name for a new implementation, then atomically activate it. This keeps in-flight requests on the handler they already acquired.
+
+## Pre-register a WASM router
+
+WASM routers can also be shipped with the Cloud Function source and registered during Go package initialization, just like native routers. A convenient pattern is `go:embed`:
+
+```go
+package bundledrouter
+
+import (
+    _ "embed"
+
+    "github.com/dash-xd/gospace/registry"
+)
+
+//go:embed router.wasm
+var module []byte
+
+func init() {
+    if _, err := registry.RegisterWASM("bundled-router-v1", module); err != nil {
+        panic(err)
+    }
+}
+```
+
+The module is then available to `registry.Activate("bundled-router-v1")` immediately when that worker instance starts. This keeps the earlier gospace registration model while allowing the registered application to be a WASM router rather than a native imported Go router.
+
+Pre-registration is useful when a router is known at deployment time but you still want the WASM isolation/interface. It is not required for routers that may appear later.
 
 ## WASM router contract
 
@@ -76,7 +106,7 @@ GOOS=wasip1 GOARCH=wasm \
 
 The resulting `router.wasm` contains the Chi router and its Go dependencies. It is independent of the native gospace build.
 
-## Run locally
+## Runtime hot/lazy loading
 
 Runtime HTTP control is disabled unless `GOSPACE_CONTROL_TOKEN` is set. The token intentionally uses `X-Gospace-Control-Token`, not `Authorization`, so Google invocation identity remains separate from worker-management authorization.
 
@@ -99,13 +129,13 @@ curl --fail-with-body \
   'http://127.0.0.1:6060/_gospace/wasm/chi-v1?activate=true'
 ```
 
-Then call the hot-loaded router through the same server:
+Then call the dynamically registered router through the same server:
 
 ```sh
 curl --fail-with-body http://127.0.0.1:6060/users/42
 ```
 
-Switch to a pre-registered native router without restarting the server:
+Switch to any other registered router, native or WASM, without restarting the server:
 
 ```sh
 curl --fail-with-body -X POST \
@@ -131,7 +161,7 @@ Code that already has trusted module bytes can bypass the HTTP control surface e
 var Main func(http.ResponseWriter, *http.Request)
 ```
 
-That preserves the `gospace-minimal` idiom: Google builds the uploaded source directory; consumers do not need to prebuild the native Go application themselves. The full `gospace` worker adds a runtime module-registration layer while retaining that same managed Gen 2 build contract.
+That preserves the `gospace-minimal` idiom: Google builds the uploaded source directory; consumers do not need to prebuild the native Go application themselves. The full `gospace` worker adds runtime module registration while retaining that same managed Gen 2 build contract.
 
 For a direct deployment of this repository's `gospace` module, the source directory is the module root and the entry point is `Main`:
 
@@ -142,17 +172,26 @@ gcloud functions deploy gospace-worker \
   --source=./gospace \
   --entry-point=Main \
   --set-env-vars=GOSPACE_CONTROL_TOKEN=... \
-  --max-instances=1 \
   --no-allow-unauthenticated
 ```
 
 Prefer Secret Manager-backed configuration for a real control credential rather than committing or logging it. Use the project's normal WIF/IAM deployment path rather than treating the example command as an authentication policy.
 
-### Instance-local hot loading
+### Instance-local registration is a cache
 
-WASM registration is process-local. Cloud Functions Gen 2 owns instance scheduling and may replace an instance at any time. It may also run multiple instances if scaling is allowed.
+WASM registration is intentionally instance-local and disposable. Cloud Functions Gen 2 owns instance scheduling, may replace warm instances, and may scale to multiple instances.
 
-For a worker intended to retain one hot-loaded router in memory, constrain that function to one active instance (`--max-instances=1`). Even then, a platform restart loses the in-memory module and it must be loaded again. A durable assignment/rehydration layer can later restore an immutable router artifact after restart without rebuilding or redeploying the native gospace worker.
+That does not require pinning the function to one instance. A router resolver can treat each worker's registry as a local cache:
+
+```text
+instance A needs foo -> resolve foo.wasm -> register -> serve -> reuse while warm
+instance B needs foo -> resolve foo.wasm -> register -> serve -> reuse while warm
+instance C needs bar -> resolve bar.wasm -> register -> serve -> reuse while warm
+```
+
+If an instance disappears, only its local registration cache disappears. A replacement instance lazily resolves the router it needs on its next request. Router artifacts and router identity should therefore be externally resolvable; instance-local registration does not need to be durable or coordinated unless a higher-level policy specifically requires it.
+
+Pre-registered WASM routers are simply the eager version of the same model: their bytes are already present in the deployment and registered when the instance initializes. Dynamically supplied routers are the lazy version.
 
 This is intentionally different from an API gateway: application requests execute inside the same managed function process that owns the stable gospace handler.
 
