@@ -14,11 +14,15 @@ import (
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
-const defaultMaxBody = 8 << 20
+const (
+	defaultMaxBody          = 8 << 20
+	defaultMemoryLimitPages = 1024 // 64 MiB per guest memory.
+)
 
 type Options struct {
-	MaxRequestBody  int64
-	MaxResponseBody uint32
+	MaxRequestBody   int64
+	MaxResponseBody  uint32
+	MemoryLimitPages uint32
 }
 
 // Handler compiles a WASM router once and instantiates an isolated reactor for
@@ -42,8 +46,14 @@ func NewHandler(ctx context.Context, wasmBytes []byte, options Options) (*Handle
 	if options.MaxResponseBody == 0 {
 		options.MaxResponseBody = defaultMaxBody
 	}
+	if options.MemoryLimitPages == 0 {
+		options.MemoryLimitPages = defaultMemoryLimitPages
+	}
 
-	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCloseOnContextDone(true).WithMemoryLimitPages(256))
+	runtimeConfig := wazero.NewRuntimeConfig().
+		WithCloseOnContextDone(true).
+		WithMemoryLimitPages(options.MemoryLimitPages)
+	runtime := wazero.NewRuntimeWithConfig(ctx, runtimeConfig)
 	ok := false
 	defer func() {
 		if !ok {
@@ -156,7 +166,6 @@ func readBody(body io.ReadCloser, limit int64) ([]byte, error) {
 	if body == nil {
 		return nil, nil
 	}
-	defer body.Close()
 	data, err := io.ReadAll(io.LimitReader(body, limit+1))
 	if err != nil {
 		return nil, fmt.Errorf("read request body: %w", err)
