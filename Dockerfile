@@ -1,4 +1,4 @@
-FROM golang:1.23.6-alpine3.21 AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /src/gospace
 
@@ -8,7 +8,7 @@ RUN go mod download
 COPY gospace ./
 RUN CGO_ENABLED=0 go build -trimpath -o /out/gospace ./cmd/api
 
-FROM alpine:3.21.2
+FROM alpine:3.23
 
 RUN apk add --no-cache ca-certificates \
     && addgroup -S goapp \
