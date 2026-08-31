@@ -34,6 +34,14 @@ func Register(name string, handler http.Handler) error {
 	return registry.Register(name, handler)
 }
 
+func RegisterWASM(name string, module []byte) (string, error) {
+	return registry.RegisterWASM(name, module)
+}
+
+func RegisterWASMContext(ctx context.Context, name string, module []byte) (string, error) {
+	return registry.RegisterWASMContext(ctx, name, module)
+}
+
 func Activate(name string) error {
 	return registry.Activate(name)
 }
