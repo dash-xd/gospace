@@ -3,6 +3,7 @@ module github.com/dash-xd/gospace
 go 1.23.6
 
 require (
+	github.com/tetratelabs/wazero v1.12.0
 	golang.org/x/oauth2 v0.26.0
 	google.golang.org/api v0.220.0
 )
