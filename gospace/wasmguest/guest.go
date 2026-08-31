@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"unsafe"
 
 	"github.com/dash-xd/gospace/wasmhttp"
@@ -14,6 +13,34 @@ var (
 	input  []byte
 	output []byte
 )
+
+type responseWriter struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func newResponseWriter() *responseWriter {
+	return &responseWriter{header: make(http.Header)}
+}
+
+func (w *responseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *responseWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+}
+
+func (w *responseWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.body.Write(p)
+}
 
 // Alloc reserves guest memory for the host request payload. Router entry
 // packages export a tiny go:wasmexport wrapper around this function.
@@ -46,17 +73,17 @@ func Handle(handler http.Handler) uint64 {
 		req.Header[key] = append([]string(nil), values...)
 	}
 
-	rw := httptest.NewRecorder()
+	rw := newResponseWriter()
 	handler.ServeHTTP(rw, req)
-	result := rw.Result()
-	defer result.Body.Close()
-
-	out := wasmhttp.Response{
-		Status: result.StatusCode,
-		Header: wasmhttp.CloneHeader(result.Header),
-		Body:   append([]byte(nil), rw.Body.Bytes()...),
+	if rw.status == 0 {
+		rw.status = http.StatusOK
 	}
-	return encode(out)
+
+	return encode(wasmhttp.Response{
+		Status: rw.status,
+		Header: wasmhttp.CloneHeader(rw.header),
+		Body:   append([]byte(nil), rw.body.Bytes()...),
+	})
 }
 
 func encodeError(status int, message string) uint64 {
