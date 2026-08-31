@@ -4,7 +4,7 @@ go 1.24
 
 require (
 	github.com/dash-xd/gospace v0.0.0
-	github.com/go-chi/chi/v5 v5.2.3
+	github.com/go-chi/chi/v5 v5.3.2
 )
 
 replace github.com/dash-xd/gospace => ../../gospace
