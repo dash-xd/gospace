@@ -10,7 +10,6 @@ import (
 
 	"github.com/dash-xd/gospace/wasmhttp"
 	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
@@ -110,7 +109,8 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	alloc := module.ExportedFunction("gospace_alloc")
 	handle := module.ExportedFunction("gospace_handle")
-	if alloc == nil || handle == nil {
+	responseLenFn := module.ExportedFunction("gospace_response_len")
+	if alloc == nil || handle == nil || responseLenFn == nil {
 		http.Error(rw, "WASM router has an incompatible gospace ABI", http.StatusBadGateway)
 		return
 	}
@@ -120,8 +120,8 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		http.Error(rw, "WASM request allocation failed", http.StatusBadGateway)
 		return
 	}
-	ptr := uint32(allocResult[0])
-	if len(payload) != 0 && !module.Memory().Write(ptr, payload) {
+	requestPtr := uint32(allocResult[0])
+	if len(payload) != 0 && !module.Memory().Write(requestPtr, payload) {
 		http.Error(rw, "WASM request memory write failed", http.StatusBadGateway)
 		return
 	}
@@ -131,8 +131,14 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		http.Error(rw, "WASM router execution failed", http.StatusBadGateway)
 		return
 	}
-	packed := handleResult[0]
-	responsePtr, responseLen := uint32(packed>>32), uint32(packed)
+	responsePtr := uint32(handleResult[0])
+
+	lenResult, err := responseLenFn.Call(ctx)
+	if err != nil || len(lenResult) != 1 {
+		http.Error(rw, "WASM response length failed", http.StatusBadGateway)
+		return
+	}
+	responseLen := uint32(lenResult[0])
 	if responseLen > h.maxResponseBody {
 		http.Error(rw, "WASM response exceeds configured limit", http.StatusBadGateway)
 		return
