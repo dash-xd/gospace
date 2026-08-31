@@ -52,9 +52,11 @@ func Alloc(size uint32) unsafe.Pointer {
 	return unsafe.Pointer(&input[0])
 }
 
-// Handle adapts the current wire request to an ordinary net/http Handler and
-// returns a packed guest-memory pointer/length for the response payload.
-func Handle(handler http.Handler) uint64 {
+// Handle adapts the current wire request to an ordinary net/http Handler,
+// stores the encoded response in guest memory, and returns its address. The
+// go:wasmexport wrapper lets the Go compiler perform the defined
+// unsafe.Pointer -> WebAssembly i32 translation.
+func Handle(handler http.Handler) unsafe.Pointer {
 	if handler == nil {
 		return encodeError(http.StatusInternalServerError, "nil router")
 	}
@@ -86,7 +88,11 @@ func Handle(handler http.Handler) uint64 {
 	})
 }
 
-func encodeError(status int, message string) uint64 {
+func ResponseLen() uint32 {
+	return uint32(len(output))
+}
+
+func encodeError(status int, message string) unsafe.Pointer {
 	return encode(wasmhttp.Response{
 		Status: status,
 		Header: map[string][]string{"Content-Type": {"text/plain; charset=utf-8"}},
@@ -94,16 +100,14 @@ func encodeError(status int, message string) uint64 {
 	})
 }
 
-func encode(response wasmhttp.Response) uint64 {
+func encode(response wasmhttp.Response) unsafe.Pointer {
 	encoded, err := json.Marshal(response)
 	if err != nil {
 		encoded = []byte(`{"status":500,"body":"d2FzbSByZXNwb25zZSBlbmNvZGluZyBmYWlsZWQK"}`)
 	}
 	output = encoded
 	if len(output) == 0 {
-		return 0
+		return nil
 	}
-
-	ptr := uint32(uintptr(unsafe.Pointer(&output[0])))
-	return uint64(ptr)<<32 | uint64(uint32(len(output)))
+	return unsafe.Pointer(&output[0])
 }
