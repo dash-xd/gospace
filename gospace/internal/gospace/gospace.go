@@ -4,42 +4,38 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/dash-xd/gospace/service"
 	"github.com/dash-xd/gospace/internal/token"
 	"github.com/dash-xd/gospace/internal/util"
+	"github.com/dash-xd/gospace/registry"
 )
 
 type Fn func(http.ResponseWriter, *http.Request)
 
-var worker = newWorker()
-
-func newWorker() *service.Service {
-	s := service.New()
-	_ = s.RegisterFunc("util", util.Main)
-	_ = s.RegisterFunc("token", token.Main)
-	return s
+func init() {
+	_ = registry.RegisterFunc("util", util.Main)
+	_ = registry.RegisterFunc("token", token.Main)
 }
 
 func Main(w http.ResponseWriter, r *http.Request) {
-	worker.ServeHTTP(w, r)
+	registry.ServeHTTP(w, r)
 }
 
 func RegisterFunc(name string, fn Fn) error {
-	return worker.RegisterFunc(name, fn)
+	return registry.RegisterFunc(name, fn)
 }
 
 func Register(name string, handler http.Handler) error {
-	return worker.Register(name, handler)
+	return registry.Register(name, handler)
 }
 
 func Activate(name string) error {
-	return worker.Activate(name)
+	return registry.Activate(name)
 }
 
 func LoadWASM(ctx context.Context, name string, module []byte, activate bool) (string, error) {
-	return worker.LoadWASM(ctx, name, module, activate)
+	return registry.LoadWASM(ctx, name, module, activate)
 }
 
 func Active() string {
-	return worker.Active()
+	return registry.Active()
 }
