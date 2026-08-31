@@ -78,6 +78,10 @@ func (s *Service) LoadWASM(ctx context.Context, name string, module []byte, acti
 	if name == "" {
 		return "", errors.New("router name is required")
 	}
+	if int64(len(module)) > s.maxWASM {
+		return "", fmt.Errorf("WASM module exceeds %d bytes", s.maxWASM)
+	}
+
 	h, err := wasmrouter.NewHandler(ctx, module, wasmrouter.Options{})
 	if err != nil {
 		return "", err
