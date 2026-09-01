@@ -4,9 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: gospace
+    environment:
+      GOSPACE_CONTROL_TOKEN: ${GOSPACE_CONTROL_TOKEN:-}
     ports:
       - "${SERVE_PORT:-6060}:${SERVE_PORT:-6060}"
-      - "6061-8900:6061-8900"
-    volumes:
-      - ./gospace:/app
-    entrypoint: ["/usr/local/bin/gospace", "-port", "${SERVE_PORT:-6060}", "-key", "serve"]
+    command: ["-port", "${SERVE_PORT:-6060}"]
