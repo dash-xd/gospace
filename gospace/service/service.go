@@ -26,6 +26,11 @@ type Options struct {
 	ControlToken   string
 	MaxWASMBytes   int64
 	MaxWASMRouters int
+	// Native is the deployment-composed Go application. Gospace does not
+	// inspect or register its internal routes. When no gospace-managed router
+	// owns a request, the request is delegated to Native exactly once.
+	// Nil means no native application and defaults to http.NotFoundHandler().
+	Native http.Handler
 }
 
 type Service struct {
@@ -33,16 +38,24 @@ type Service struct {
 	control      *http.ServeMux
 	controlToken string
 	maxWASM      int64
+	native       http.Handler
 
-	wasmEngine      *wasmrouter.Engine
-	wasmEngineErr   error
-	maxWASMRouters  int
-	wasm            wasmRegistry
-	loads           loadGroup
+	wasmEngine     *wasmrouter.Engine
+	wasmEngineErr  error
+	maxWASMRouters int
+	wasm           wasmRegistry
+	loads          loadGroup
 }
 
 func New() *Service {
 	return NewWithOptions(Options{ControlToken: os.Getenv("GOSPACE_CONTROL_TOKEN")})
+}
+
+func NewWithNative(native http.Handler) *Service {
+	return NewWithOptions(Options{
+		ControlToken: os.Getenv("GOSPACE_CONTROL_TOKEN"),
+		Native:       native,
+	})
 }
 
 func NewWithOptions(options Options) *Service {
@@ -52,11 +65,15 @@ func NewWithOptions(options Options) *Service {
 	if options.MaxWASMRouters <= 0 {
 		options.MaxWASMRouters = defaultMaxWASMRouters
 	}
+	if options.Native == nil {
+		options.Native = http.NotFoundHandler()
+	}
 	engine, engineErr := wasmrouter.NewEngine(context.Background(), wasmrouter.EngineOptions{})
 	s := &Service{
 		worker:          router.NewWorker(),
 		controlToken:    options.ControlToken,
 		maxWASM:         options.MaxWASMBytes,
+		native:          options.Native,
 		wasmEngine:      engine,
 		wasmEngineErr:   engineErr,
 		maxWASMRouters:  options.MaxWASMRouters,
@@ -96,9 +113,6 @@ func (s *Service) RegisterWASMRoutes(ctx context.Context, name string, module []
 	if err != nil {
 		return "", err
 	}
-	// Plain registration is cache population, so enforce the bound immediately.
-	// Load-and-dispatch uses registerWASM directly and defers eviction until after
-	// the triggering request has finished executing.
 	s.evictWASMIfNeeded()
 	return digest, nil
 }
@@ -109,38 +123,22 @@ func (s *Service) Activate(name string) error {
 
 func (s *Service) Active() string { return s.worker.Active() }
 
-// activateThenEvict pins the new active router before capacity enforcement. If
-// the cache is already full, this prevents admission from immediately evicting
-// the router the caller is trying to activate.
-func (s *Service) activateThenEvict(name string) error {
-	if err := s.worker.Activate(name); err != nil {
-		s.evictWASMIfNeeded()
-		return err
-	}
-	s.evictWASMIfNeeded()
-	return nil
-}
-
 func (s *Service) LoadWASM(ctx context.Context, name string, module []byte, activate bool) (string, error) {
 	return s.LoadWASMRoutes(ctx, name, module, nil, activate)
 }
 
 func (s *Service) LoadWASMRoutes(ctx context.Context, name string, module []byte, patterns []string, activate bool) (string, error) {
-	// Do not evict between registration and activation. With a full bounded cache
-	// an active incumbent may be pinned, making the newly registered router the
-	// only evictable entry. Activating first lets the cache evict the old router
-	// instead of deleting the router this call is trying to activate.
 	digest, err := s.registerWASM(ctx, name, module, patterns)
 	if err != nil {
 		return "", err
 	}
 	if activate {
-		if err := s.activateThenEvict(name); err != nil {
+		if err := s.worker.Activate(name); err != nil {
+			s.evictWASMIfNeeded()
 			return "", err
 		}
-	} else {
-		s.evictWASMIfNeeded()
 	}
+	s.evictWASMIfNeeded()
 	return digest, nil
 }
 
@@ -179,9 +177,6 @@ func (s *Service) listRouters(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// resolveRoute is a non-executing ownership query used by pyspace when more
-// than one gospace subprocess is registered. The endpoint remains protected by
-// the control token and normally travels only over the private Unix socket.
 func (s *Service) resolveRoute(w http.ResponseWriter, r *http.Request) {
 	method := r.URL.Query().Get("method")
 	path := r.URL.Query().Get("path")
