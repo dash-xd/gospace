@@ -79,15 +79,10 @@ func NewWorker() *Worker {
 	return w
 }
 
-// Register publishes an immutable named handler without catchall route
-// metadata. It can still be selected explicitly or activated as the default.
 func (w *Worker) Register(name string, handler http.Handler) error {
 	return w.RegisterRoutes(name, handler, nil)
 }
 
-// RegisterRoutes publishes an immutable named handler and the net/http
-// ServeMux patterns it owns. Patterns are used only for matching; handlers are
-// never executed speculatively during route discovery.
 func (w *Worker) RegisterRoutes(name string, handler http.Handler, patterns []string) error {
 	if name == "" || handler == nil {
 		return errors.New("router name and handler are required")
@@ -127,13 +122,12 @@ func (w *Worker) RegisterFuncRoutes(name string, fn func(http.ResponseWriter, *h
 	return w.RegisterRoutes(name, http.HandlerFunc(fn), patterns)
 }
 
-// Activate atomically redirects subsequent default requests to a registered
-// router. Request-scoped dispatch remains independent of this selection.
+// Activate is serialized with Remove by the worker lock: a router cannot become
+// active after an eviction decision has already removed it from the registry.
 func (w *Worker) Activate(name string) error {
 	w.mu.RLock()
-	_, ok := w.handlers[name]
-	w.mu.RUnlock()
-	if !ok {
+	defer w.mu.RUnlock()
+	if _, ok := w.handlers[name]; !ok {
 		return ErrUnknownRouter
 	}
 	w.active.Store(&activeHandler{name: name})
@@ -173,8 +167,6 @@ func (w *Worker) Routes(name string) []string {
 	return patterns
 }
 
-// Match resolves route ownership using immutable metadata only. No application
-// handler is called until after a single owner has been selected.
 func (w *Worker) Match(req *http.Request) (string, bool) {
 	table := w.table.Load()
 	if table == nil {
@@ -183,15 +175,14 @@ func (w *Worker) Match(req *http.Request) (string, bool) {
 	return table.match(req)
 }
 
-// Remove retires a non-active router. It disappears from named and route-index
-// lookups before this method waits for any requests that already leased it.
-// The returned handler is therefore safe for the caller to close.
 func (w *Worker) Remove(name string) (http.Handler, error) {
-	if w.Active() == name {
+	w.mu.Lock()
+	active := w.active.Load()
+	if active != nil && active.name == name {
+		w.mu.Unlock()
 		return nil, ErrRouterActive
 	}
 
-	w.mu.Lock()
 	entry, ok := w.handlers[name]
 	if !ok {
 		w.mu.Unlock()
