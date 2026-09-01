@@ -47,10 +47,11 @@ func TestDispatchDigestRejectsWrongArtifact(t *testing.T) {
 	}
 
 	// The dispatch path only needs the immutable service-level association;
-	// RegisterWASM is covered separately by WASM integration tests.
-	s.wasmMu.Lock()
-	s.wasmDigests["wasm-v1"] = "abc123"
-	s.wasmMu.Unlock()
+	// actual WASM compilation is covered separately.
+	s.wasm.mu.Lock()
+	s.wasm.clock++
+	s.wasm.entries["wasm-v1"] = &wasmEntry{digest: "abc123", lastUsed: s.wasm.clock}
+	s.wasm.mu.Unlock()
 
 	rr := httptest.NewRecorder()
 	err := s.DispatchDigest("wasm-v1", "different", rr, httptest.NewRequest(http.MethodGet, "/", nil))
