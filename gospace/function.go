@@ -6,7 +6,7 @@ package function
 import (
 	"net/http"
 
-	"github.com/dash-xd/gospace/internal/gospace"
+	"github.com/dash-xd/gospace/registry"
 )
 
-var Main func(http.ResponseWriter, *http.Request) = gospace.Main
+var Main func(http.ResponseWriter, *http.Request) = registry.ServeHTTP
