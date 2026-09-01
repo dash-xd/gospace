@@ -16,10 +16,10 @@ import (
 )
 
 const (
-	ControlPrefix          = "/_gospace/"
-	ControlTokenHeader     = "X-Gospace-Control-Token"
-	defaultMaxWASM         = 32 << 20
-	defaultMaxWASMRouters  = 64
+	ControlPrefix         = "/_gospace/"
+	ControlTokenHeader    = "X-Gospace-Control-Token"
+	defaultMaxWASM        = 32 << 20
+	defaultMaxWASMRouters = 64
 )
 
 type Options struct {
@@ -34,11 +34,11 @@ type Service struct {
 	controlToken string
 	maxWASM      int64
 
-	wasmEngine    *wasmrouter.Engine
-	wasmEngineErr error
+	wasmEngine     *wasmrouter.Engine
+	wasmEngineErr  error
 	maxWASMRouters int
-	wasm          wasmRegistry
-	loads         loadGroup
+	wasm           wasmRegistry
+	loads          loadGroup
 }
 
 func New() *Service {
@@ -92,7 +92,15 @@ func (s *Service) RegisterWASM(ctx context.Context, name string, module []byte) 
 }
 
 func (s *Service) RegisterWASMRoutes(ctx context.Context, name string, module []byte, patterns []string) (string, error) {
-	return s.registerWASM(ctx, name, module, patterns)
+	digest, err := s.registerWASM(ctx, name, module, patterns)
+	if err != nil {
+		return "", err
+	}
+	// Plain registration is cache population, so enforce the bound immediately.
+	// Load-and-dispatch uses registerWASM directly and defers eviction until after
+	// the triggering request has finished executing.
+	s.evictWASMIfNeeded()
+	return digest, nil
 }
 
 func (s *Service) Activate(name string) error {
@@ -106,15 +114,21 @@ func (s *Service) LoadWASM(ctx context.Context, name string, module []byte, acti
 }
 
 func (s *Service) LoadWASMRoutes(ctx context.Context, name string, module []byte, patterns []string, activate bool) (string, error) {
-	digest, err := s.RegisterWASMRoutes(ctx, name, module, patterns)
+	// Do not evict between registration and activation. With a full bounded cache
+	// an active incumbent may be pinned, making the newly registered router the
+	// only evictable entry. Activating first lets the cache evict the old router
+	// instead of deleting the router this call is trying to activate.
+	digest, err := s.registerWASM(ctx, name, module, patterns)
 	if err != nil {
 		return "", err
 	}
 	if activate {
 		if err := s.worker.Activate(name); err != nil {
+			s.evictWASMIfNeeded()
 			return "", err
 		}
 	}
+	s.evictWASMIfNeeded()
 	return digest, nil
 }
 
