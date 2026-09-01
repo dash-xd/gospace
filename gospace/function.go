@@ -1,12 +1,15 @@
 // Package function is the Google Cloud Functions Gen 2 entry package for the
-// full gospace worker. The Functions buildpack owns main(); this package only
-// exposes the exact bare HTTP function type it expects.
+// generic gospace worker. The Functions buildpack owns main(); this package
+// exposes an application-empty runtime. Composed deployments should build their
+// own entry package with server.New(nativeHandler).
 package function
 
 import (
 	"net/http"
 
-	"github.com/dash-xd/gospace/registry"
+	"github.com/dash-xd/gospace/server"
 )
 
-var Main func(http.ResponseWriter, *http.Request) = registry.ServeHTTP
+var defaultServer = server.New(nil)
+
+var Main func(http.ResponseWriter, *http.Request) = defaultServer.ServeHTTP
