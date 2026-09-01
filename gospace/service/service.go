@@ -88,14 +88,17 @@ func (s *Service) RegisterWASM(ctx context.Context, name string, module []byte) 
 	if err != nil {
 		return "", err
 	}
+
+	// Publish the handler name and its content identity as one service-level
+	// registration step. A concurrent request that observes the handler then
+	// blocks on wasmMu until its digest is also visible.
+	s.wasmMu.Lock()
+	defer s.wasmMu.Unlock()
 	if err := s.worker.Register(name, h); err != nil {
 		_ = h.Close()
 		return "", err
 	}
-
-	s.wasmMu.Lock()
 	s.wasmDigests[name] = digest
-	s.wasmMu.Unlock()
 	return digest, nil
 }
 
