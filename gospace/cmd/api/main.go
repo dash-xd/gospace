@@ -8,19 +8,19 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/dash-xd/gospace/internal/gospace"
+	"github.com/dash-xd/gospace/registry"
 )
 
 func main() {
 	port, socketPath, initial := parseArgs()
 	if initial != "" {
-		if err := gospace.Activate(initial); err != nil {
+		if err := registry.Activate(initial); err != nil {
 			fmt.Fprintf(os.Stderr, "activate router %q: %v\n", initial, err)
 			os.Exit(1)
 		}
 	}
 
-	handler := http.HandlerFunc(gospace.Main)
+	handler := http.HandlerFunc(registry.ServeHTTP)
 	if socketPath != "" {
 		if err := serveUnix(socketPath, handler); err != nil {
 			fmt.Fprintf(os.Stderr, "server error: %v\n", err)
