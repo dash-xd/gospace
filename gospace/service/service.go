@@ -69,10 +69,6 @@ func (s *Service) RegisterFunc(name string, fn func(http.ResponseWriter, *http.R
 	return s.worker.RegisterFunc(name, fn)
 }
 
-// RegisterWASM compiles module bytes and registers the resulting WASM-backed
-// http.Handler without activating it. This is the WASM equivalent of Register:
-// callers may invoke it during package initialization for modules bundled with
-// the deployment, or later for modules resolved dynamically at runtime.
 func (s *Service) RegisterWASM(ctx context.Context, name string, module []byte) (string, error) {
 	if name == "" {
 		return "", errors.New("router name is required")
@@ -89,9 +85,6 @@ func (s *Service) RegisterWASM(ctx context.Context, name string, module []byte) 
 		return "", err
 	}
 
-	// Publish the handler name and its content identity as one service-level
-	// registration step. A concurrent request that observes the handler then
-	// blocks on wasmMu until its digest is also visible.
 	s.wasmMu.Lock()
 	defer s.wasmMu.Unlock()
 	if err := s.worker.Register(name, h); err != nil {
@@ -108,10 +101,6 @@ func (s *Service) Activate(name string) error {
 
 func (s *Service) Active() string { return s.worker.Active() }
 
-// LoadWASM is the runtime convenience operation: register a WASM router and,
-// optionally, atomically activate it. The registration mechanism is identical
-// to RegisterWASM; "hotload" describes when the bytes arrive, not a different
-// class of router inside the worker.
 func (s *Service) LoadWASM(ctx context.Context, name string, module []byte, activate bool) (string, error) {
 	digest, err := s.RegisterWASM(ctx, name, module)
 	if err != nil {
@@ -128,14 +117,18 @@ func (s *Service) LoadWASM(ctx context.Context, name string, module []byte, acti
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, ControlPrefix) {
 		if !s.authorizeControl(r) {
-			// Leave the privileged surface undiscoverable when runtime control is
-			// disabled or the caller does not possess the separate control token.
 			http.NotFound(w, r)
 			return
 		}
 		s.control.ServeHTTP(w, r)
 		return
 	}
+
+	if r.Header.Get(RouterHeader) != "" {
+		s.serveHinted(w, r)
+		return
+	}
+
 	s.worker.ServeHTTP(w, r)
 }
 
