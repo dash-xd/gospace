@@ -1,8 +1,8 @@
 # gospace
 
-`gospace` is a stable Go HTTP worker whose routers can be native Go handlers, pre-registered WASM, or WASM supplied lazily with the request that needs it.
+`gospace` is a stable Go HTTP worker whose routers can be native Go handlers, pre-registered WASM, or WASM loaded lazily.
 
-Registration and dispatch are separate. A router can be the default via `Activate`, or one request can select a named router without changing the default.
+Normal requests do not need a router header. Gospace first tries already-registered routers. A hint is only a direct shortcut when the caller already knows the router, or when a cold request carries the WASM artifact needed to load it.
 
 ## Native router
 
@@ -25,7 +25,15 @@ func init() {
 }
 ```
 
-A named request can use it without activation:
+Once registered, this works without a hint:
+
+```http
+GET /hello
+```
+
+Gospace tries the active router first, then the remaining registered routers until one returns something other than 404.
+
+If the caller already knows the target, it can skip discovery:
 
 ```http
 GET /hello
@@ -52,18 +60,15 @@ func init() {
 }
 ```
 
-## Lazy WASM: one request
+After registration, an ordinary request can be found through catchall routing:
 
-The lazy path does not require `POST /_gospace/wasm/...` followed by a second application request.
+```http
+GET /users/42
+```
 
-A cold request carries:
+## Cold WASM hint
 
-- `X-Gospace-Router`: immutable router name;
-- `X-Gospace-Router-SHA256`: expected WASM digest;
-- `X-Gospace-Control-Token`: required only when this request actually loads code;
-- `Content-Type: multipart/related` with the WASM bytes and the original HTTP request.
-
-Example wire shape:
+A router that is not present yet still needs its artifact. When the caller already knows it is a cold WASM route, the request can cut directly to the loader:
 
 ```http
 POST /
@@ -89,9 +94,15 @@ Content-Type: application/vnd.gospace.request+json
 --gospace--
 ```
 
-On a cold instance gospace verifies the SHA-256, compiles and registers `users-v1`, reconstructs the inner request, and immediately runs `/users/42` through that router. The router is not globally activated.
+That one request verifies, compiles, registers and executes the router. It does not globally activate it.
 
-Once warm, the same router can be called with an ordinary request:
+Afterward, the route can be discovered normally:
+
+```http
+GET /users/99
+```
+
+or selected directly:
 
 ```http
 GET /users/99
@@ -99,9 +110,20 @@ X-Gospace-Router: users-v1
 X-Gospace-Router-SHA256: <sha256>
 ```
 
-No WASM bytes or control token are needed on the warm path. If the named router is absent and no multipart artifact is supplied, gospace returns `428 Precondition Required` instead of requiring a separate registration round trip.
+## Resolution order
 
-The multipart request part uses the same `wasmhttp.Request` structure used by the host/guest bridge. Its `body` field is a JSON `[]byte`, so JSON encoding represents it as base64. The WASM artifact itself remains raw binary.
+```text
+X-Gospace-Router supplied
+    -> direct registered router
+    -> cold WASM load from this request if missing
+
+otherwise
+    -> active router
+    -> remaining registered native/WASM routers
+    -> 404
+```
+
+Catchall discovery must observe a candidate router's 404 before trying another router, so that path buffers the request/response while probing multiple candidates. `X-Gospace-Router` is therefore also the direct path for callers or CDNs that want to skip that discovery step.
 
 ## WASM router contract
 
@@ -113,7 +135,7 @@ gospace_handle() unsafe.Pointer
 gospace_response_len() uint32
 ```
 
-`wasmguest` adapts an ordinary `net/http.Handler` to those exports, so router code can still use Chi, `http.ServeMux`, and normal middleware.
+`wasmguest` adapts an ordinary `net/http.Handler` to those exports, so router code can use Chi, `http.ServeMux`, and normal middleware.
 
 The included Chi example builds with:
 
@@ -123,11 +145,9 @@ GOOS=wasip1 GOARCH=wasm \
   go build -buildmode=c-shared -o router.wasm .
 ```
 
-Each request gets a fresh WASM module instance from a compiled module. The compiled handler is cached by immutable router name/digest while the worker instance remains warm.
-
 ## Explicit control API
 
-`GOSPACE_CONTROL_TOKEN` enables the older explicit management endpoints:
+`GOSPACE_CONTROL_TOKEN` enables:
 
 ```text
 GET  /_gospace/routers
@@ -135,7 +155,7 @@ POST /_gospace/activate/<name>
 POST /_gospace/wasm/<name>
 ```
 
-Those endpoints remain useful for administration and prewarming. They are not required for lazy request dispatch.
+These are management/prewarming APIs. Normal route discovery does not require a registration request first.
 
 ## Server binary
 
@@ -144,36 +164,27 @@ cd gospace
 go build -o gospace ./cmd/api
 ```
 
-TCP:
-
 ```sh
 ./gospace -port 6060
 ```
 
-Unix socket, used by `pyspace-minimal`:
+or, for `pyspace-minimal`:
 
 ```sh
 ./gospace -unix-socket /tmp/pyspace/gospace.sock
 ```
 
-## Google Cloud Functions Gen 2
-
-`gospace/function.go` exposes the stable Go HTTP entry point `Main`. For a direct Gen 2 deployment the `gospace` directory is the module root and `Main` is the function entry point.
-
-Instance-local registration is intentionally a cache. If Google replaces an instance, the next self-contained request can load the required router again. No global activation or cross-instance cache coordination is required.
-
 ## Pyspace Gen 1 host
 
-`dash-xd/pyspace-minimal` can supervise the gospace binary under a Python 3.12 Gen 1 function. The same incoming request can contain both layers of hints:
+`dash-xd/pyspace-minimal` can supervise gospace under Python 3.12 Gen 1.
+
+A normal warm request can simply flow through both catchalls:
 
 ```text
-X-Pyspace-App: gospace-v1
-X-Pyspace-Gospace-Binary: /workspace/bin/gospace
-X-Pyspace-Control-Token: ...
-
-X-Gospace-Router: users-v1
-X-Gospace-Router-SHA256: ...
-X-Gospace-Control-Token: ...
+request
+  -> pyspace Python route lookup
+  -> gospace fallback
+  -> gospace registered router lookup
 ```
 
-On a fully cold instance that one request can therefore register/spawn gospace, load the WASM router, and execute the enclosed application request. On a warm instance only the two name/digest selection headers are needed.
+If both layers are cold and the caller already knows the destination, the same request may additionally carry the pyspace executable hint and gospace WASM hint. Those headers accelerate/enable cold resolution; they are not required once the relevant routes are already discoverable locally.
