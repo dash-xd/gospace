@@ -2,9 +2,7 @@ package service
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,21 +10,22 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/dash-xd/gospace/router"
 	wasmrouter "github.com/dash-xd/gospace/wasm"
 )
 
 const (
-	ControlPrefix      = "/_gospace/"
-	ControlTokenHeader = "X-Gospace-Control-Token"
-	defaultMaxWASM     = 32 << 20
+	ControlPrefix          = "/_gospace/"
+	ControlTokenHeader     = "X-Gospace-Control-Token"
+	defaultMaxWASM         = 32 << 20
+	defaultMaxWASMRouters  = 64
 )
 
 type Options struct {
-	ControlToken string
-	MaxWASMBytes int64
+	ControlToken   string
+	MaxWASMBytes   int64
+	MaxWASMRouters int
 }
 
 type Service struct {
@@ -34,8 +33,12 @@ type Service struct {
 	control      *http.ServeMux
 	controlToken string
 	maxWASM      int64
-	wasmMu       sync.RWMutex
-	wasmDigests  map[string]string
+
+	wasmEngine    *wasmrouter.Engine
+	wasmEngineErr error
+	maxWASMRouters int
+	wasm          wasmRegistry
+	loads         loadGroup
 }
 
 func New() *Service {
@@ -46,15 +49,22 @@ func NewWithOptions(options Options) *Service {
 	if options.MaxWASMBytes <= 0 {
 		options.MaxWASMBytes = defaultMaxWASM
 	}
-
+	if options.MaxWASMRouters <= 0 {
+		options.MaxWASMRouters = defaultMaxWASMRouters
+	}
+	engine, engineErr := wasmrouter.NewEngine(context.Background(), wasmrouter.EngineOptions{})
 	s := &Service{
-		worker:       router.NewWorker(),
-		controlToken: options.ControlToken,
-		maxWASM:      options.MaxWASMBytes,
-		wasmDigests:  make(map[string]string),
+		worker:          router.NewWorker(),
+		controlToken:    options.ControlToken,
+		maxWASM:         options.MaxWASMBytes,
+		wasmEngine:      engine,
+		wasmEngineErr:   engineErr,
+		maxWASMRouters:  options.MaxWASMRouters,
+		wasm:            newWASMRegistry(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /_gospace/routers", s.listRouters)
+	mux.HandleFunc("GET /_gospace/resolve", s.resolveRoute)
 	mux.HandleFunc("POST /_gospace/activate/{name}", s.activateRouter)
 	mux.HandleFunc("POST /_gospace/wasm/{name}", s.loadWASM)
 	s.control = mux
@@ -65,34 +75,24 @@ func (s *Service) Register(name string, handler http.Handler) error {
 	return s.worker.Register(name, handler)
 }
 
+func (s *Service) RegisterRoutes(name string, handler http.Handler, patterns []string) error {
+	return s.worker.RegisterRoutes(name, handler, patterns)
+}
+
 func (s *Service) RegisterFunc(name string, fn func(http.ResponseWriter, *http.Request)) error {
 	return s.worker.RegisterFunc(name, fn)
 }
 
+func (s *Service) RegisterFuncRoutes(name string, fn func(http.ResponseWriter, *http.Request), patterns []string) error {
+	return s.worker.RegisterFuncRoutes(name, fn, patterns)
+}
+
 func (s *Service) RegisterWASM(ctx context.Context, name string, module []byte) (string, error) {
-	if name == "" {
-		return "", errors.New("router name is required")
-	}
-	if int64(len(module)) > s.maxWASM {
-		return "", fmt.Errorf("WASM module exceeds %d bytes", s.maxWASM)
-	}
+	return s.RegisterWASMRoutes(ctx, name, module, nil)
+}
 
-	sum := sha256.Sum256(module)
-	digest := hex.EncodeToString(sum[:])
-
-	h, err := wasmrouter.NewHandler(ctx, module, wasmrouter.Options{})
-	if err != nil {
-		return "", err
-	}
-
-	s.wasmMu.Lock()
-	defer s.wasmMu.Unlock()
-	if err := s.worker.Register(name, h); err != nil {
-		_ = h.Close()
-		return "", err
-	}
-	s.wasmDigests[name] = digest
-	return digest, nil
+func (s *Service) RegisterWASMRoutes(ctx context.Context, name string, module []byte, patterns []string) (string, error) {
+	return s.registerWASM(ctx, name, module, patterns)
 }
 
 func (s *Service) Activate(name string) error {
@@ -102,7 +102,11 @@ func (s *Service) Activate(name string) error {
 func (s *Service) Active() string { return s.worker.Active() }
 
 func (s *Service) LoadWASM(ctx context.Context, name string, module []byte, activate bool) (string, error) {
-	digest, err := s.RegisterWASM(ctx, name, module)
+	return s.LoadWASMRoutes(ctx, name, module, nil, activate)
+}
+
+func (s *Service) LoadWASMRoutes(ctx context.Context, name string, module []byte, patterns []string, activate bool) (string, error) {
+	digest, err := s.RegisterWASMRoutes(ctx, name, module, patterns)
 	if err != nil {
 		return "", err
 	}
@@ -124,15 +128,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A router header is an optional direct path. It can avoid catchall probing
-	// and, on a cold miss, carry the artifact needed to load that router.
 	if r.Header.Get(RouterHeader) != "" {
 		s.serveHinted(w, r)
 		return
 	}
-
-	// Without a hint, discover the route from routers already present in this
-	// worker. The active router is tried first, then the remaining registrations.
 	s.serveCatchall(w, r)
 }
 
@@ -152,6 +151,29 @@ func (s *Service) listRouters(w http.ResponseWriter, _ *http.Request) {
 		"active":  s.worker.Active(),
 		"routers": s.worker.Names(),
 	})
+}
+
+// resolveRoute is a non-executing ownership query used by pyspace when more
+// than one gospace subprocess is registered. The endpoint remains protected by
+// the control token and normally travels only over the private Unix socket.
+func (s *Service) resolveRoute(w http.ResponseWriter, r *http.Request) {
+	method := r.URL.Query().Get("method")
+	path := r.URL.Query().Get("path")
+	if method == "" || path == "" || path[0] != '/' {
+		http.Error(w, "method and absolute path are required", http.StatusBadRequest)
+		return
+	}
+	probe, err := http.NewRequest(method, path, nil)
+	if err != nil {
+		http.Error(w, "invalid route probe", http.StatusBadRequest)
+		return
+	}
+	name, ok := s.worker.Match(probe)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"router": name})
 }
 
 func (s *Service) activateRouter(w http.ResponseWriter, r *http.Request) {
@@ -179,8 +201,9 @@ func (s *Service) loadWASM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	patterns := splitRoutePatterns(r.Header.Get(RouterRoutesHeader))
 	activate := r.URL.Query().Get("activate") == "true"
-	digest, err := s.LoadWASM(r.Context(), name, module, activate)
+	digest, err := s.LoadWASMRoutes(r.Context(), name, module, patterns, activate)
 	if err != nil {
 		if errors.Is(err, router.ErrRouterExists) {
 			http.Error(w, "router name already registered; use an immutable/versioned name", http.StatusConflict)
@@ -193,6 +216,7 @@ func (s *Service) loadWASM(w http.ResponseWriter, r *http.Request) {
 		"name":      name,
 		"sha256":    digest,
 		"active":    activate,
+		"routes":    patterns,
 		"sizeBytes": len(module),
 	})
 }
