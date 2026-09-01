@@ -8,21 +8,21 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/dash-xd/gospace/registry"
+	"github.com/dash-xd/gospace/server"
 )
 
 func main() {
 	port, socketPath, initial := parseArgs()
+	app := server.New(nil)
 	if initial != "" {
-		if err := registry.Activate(initial); err != nil {
+		if err := app.Activate(initial); err != nil {
 			fmt.Fprintf(os.Stderr, "activate router %q: %v\n", initial, err)
 			os.Exit(1)
 		}
 	}
 
-	handler := http.HandlerFunc(registry.ServeHTTP)
 	if socketPath != "" {
-		if err := serveUnix(socketPath, handler); err != nil {
+		if err := serveUnix(socketPath, app); err != nil {
 			fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 			os.Exit(1)
 		}
@@ -31,7 +31,7 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", port)
 	fmt.Printf("gospace worker is listening on http://localhost%s\n", addr)
-	if err := http.ListenAndServe(addr, handler); err != nil {
+	if err := http.ListenAndServe(addr, app); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 		os.Exit(1)
 	}
@@ -62,7 +62,7 @@ func serveUnix(path string, handler http.Handler) error {
 func parseArgs() (int, string, string) {
 	portPtr := flag.Int("port", 6060, "Port for the server to listen on")
 	socketPtr := flag.String("unix-socket", "", "Unix-domain socket to listen on instead of TCP")
-	initialPtr := flag.String("router", "", "Optional pre-registered router to activate at startup")
+	initialPtr := flag.String("router", "", "Optional pre-registered gospace router to activate at startup")
 	flag.Parse()
 
 	if *socketPtr == "" && (*portPtr <= 0 || *portPtr > 65535) {
