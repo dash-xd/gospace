@@ -37,6 +37,12 @@ func (s *Service) LoadAndDispatchWASMRoutes(ctx context.Context, name, expectedD
 	if err != nil {
 		return digest, loaded, err
 	}
+
+	// A cold router must be allowed to serve the request that caused it to be
+	// compiled before bounded-cache eviction runs. This matters when every older
+	// entry is pinned (for example the active router) and the new router would
+	// otherwise be the only immediate eviction candidate.
+	defer s.evictWASMIfNeeded()
 	if err := s.worker.ServeRouter(name, rw, req); err != nil {
 		return digest, loaded, err
 	}
