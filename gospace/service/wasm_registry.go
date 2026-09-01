@@ -65,11 +65,15 @@ func (g *loadGroup) Do(key string, fn func() (loadResult, error)) (loadResult, b
 	g.calls[key] = call
 	g.mu.Unlock()
 
+	// Always release followers and remove the key, even if the load function
+	// panics. The panic still propagates to the leader after waiters are unblocked.
+	defer func() {
+		close(call.done)
+		g.mu.Lock()
+		delete(g.calls, key)
+		g.mu.Unlock()
+	}()
 	call.result, call.err = fn()
-	close(call.done)
-	g.mu.Lock()
-	delete(g.calls, key)
-	g.mu.Unlock()
 	return call.result, false, call.err
 }
 
@@ -97,22 +101,26 @@ func (s *Service) registerWASM(ctx context.Context, name string, module []byte, 
 	if err != nil {
 		return "", err
 	}
-	if err := s.worker.RegisterRoutes(name, h, patterns); err != nil {
-		_ = h.Close()
-		return "", err
-	}
 
+	// Publish the route handler and its digest/routes metadata as one observable
+	// service-level operation. Holding wasm.mu across Worker.RegisterRoutes means
+	// a concurrent DispatchDigest can see the handler first, but then blocks on
+	// WASMDigest until the corresponding metadata has been committed.
 	s.wasm.mu.Lock()
 	s.wasm.clock++
-	s.wasm.entries[name] = &wasmEntry{
+	entry := &wasmEntry{
 		digest:   digest,
 		handler:  h,
 		routes:   append([]string(nil), patterns...),
 		lastUsed: s.wasm.clock,
 	}
+	if err := s.worker.RegisterRoutes(name, h, patterns); err != nil {
+		s.wasm.mu.Unlock()
+		_ = h.Close()
+		return "", err
+	}
+	s.wasm.entries[name] = entry
 	s.wasm.mu.Unlock()
-
-	s.evictWASMIfNeeded()
 	return digest, nil
 }
 
@@ -175,10 +183,6 @@ func sameStrings(a, b []string) bool {
 
 func (s *Service) ensureWASM(ctx context.Context, name, expectedDigest string, module []byte, patterns []string) (string, bool, error) {
 	if _, ok := s.worker.Handler(name); ok {
-		// A handler becomes visible immediately before its cache metadata is
-		// published. Treat it as fully cached only once the digest record is also
-		// visible; otherwise fall through to the name+digest singleflight below,
-		// whose leader owns the publication in progress.
 		if digest, published := s.WASMDigest(name); published {
 			if expectedDigest != "" && digest != expectedDigest {
 				return "", false, fmt.Errorf("%w: router %q has %q, want %q", ErrRouterDigestMismatch, name, digest, expectedDigest)
