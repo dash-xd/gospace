@@ -2,7 +2,7 @@
 
 `gospace` is a stable Go HTTP worker whose routers can be native Go handlers, pre-registered WASM, or WASM loaded lazily.
 
-Normal requests do not need a router header. Gospace first tries already-registered routers. A hint is only a direct shortcut when the caller already knows the router, or when a cold request carries the WASM artifact needed to load it.
+Normal requests do not need a router header. Routers that want to participate in no-header discovery publish immutable `net/http.ServeMux`-style route metadata at registration time. Gospace matches that metadata without executing candidate application handlers, then executes exactly one selected router. A hint remains an optional direct shortcut when the caller already knows the router, or when a cold request carries the WASM artifact needed to load it.
 
 ## Native router
 
@@ -19,7 +19,7 @@ func init() {
     mux.HandleFunc("GET /hello", func(w http.ResponseWriter, _ *http.Request) {
         _, _ = w.Write([]byte("hello"))
     })
-    if err := registry.Register("hello-v1", mux); err != nil {
+    if err := registry.RegisterRoutes("hello-v1", mux, []string{"GET /hello"}); err != nil {
         panic(err)
     }
 }
@@ -31,14 +31,16 @@ Once registered, this works without a hint:
 GET /hello
 ```
 
-Gospace tries the active router first, then the remaining registered routers until one returns something other than 404.
+Route ownership is resolved from the declared patterns only; gospace does not call unrelated handlers and interpret their 404s as misses. Conflicting ownership metadata is rejected during registration using Go `http.ServeMux` pattern semantics.
 
-If the caller already knows the target, it can skip discovery:
+If the caller already knows the target, it can bypass the route index:
 
 ```http
 GET /hello
 X-Gospace-Router: hello-v1
 ```
+
+`Register` remains available for direct-only routers that should not participate in catchall discovery.
 
 ## Pre-register WASM
 
@@ -54,21 +56,27 @@ import (
 var module []byte
 
 func init() {
-    if _, err := registry.RegisterWASM("users-v1", module); err != nil {
+    if _, err := registry.RegisterWASMRoutes(
+        "users-v1",
+        module,
+        []string{"GET /users/{id}"},
+    ); err != nil {
         panic(err)
     }
 }
 ```
 
-After registration, an ordinary request can be found through catchall routing:
+After registration, an ordinary request is resolved through the same route index:
 
 ```http
 GET /users/42
 ```
 
+`RegisterWASM` remains the direct-only form when no route metadata is desired.
+
 ## Cold WASM hint
 
-A router that is not present yet still needs its artifact. When the caller already knows it is a cold WASM route, the request can cut directly to the loader:
+A router that is not present yet still needs its artifact. When the caller already knows it is a cold WASM route, one `multipart/related` request can carry the raw module, immutable route manifest, and application request:
 
 ```http
 POST /
@@ -82,6 +90,10 @@ Content-Type: application/wasm
 
 <raw router.wasm bytes>
 --gospace
+Content-Type: application/vnd.gospace.routes+json
+
+{"patterns":["GET /users/{id}"]}
+--gospace
 Content-Type: application/vnd.gospace.request+json
 
 {
@@ -94,9 +106,9 @@ Content-Type: application/vnd.gospace.request+json
 --gospace--
 ```
 
-That one request verifies, compiles, registers and executes the router. It does not globally activate it.
+That one request verifies the SHA-256, singleflights concurrent compilation for the same immutable `name+digest`, publishes route ownership, and executes the original application request. It does not globally activate the router.
 
-Afterward, the route can be discovered normally:
+Afterward, while the compiled router remains in the instance-local cache, the route can be discovered normally:
 
 ```http
 GET /users/99
@@ -118,12 +130,20 @@ X-Gospace-Router supplied
     -> cold WASM load from this request if missing
 
 otherwise
-    -> active router
-    -> remaining registered native/WASM routers
+    -> non-executing route-index match
+    -> exactly one native/WASM router
     -> 404
 ```
 
-Catchall discovery must observe a candidate router's 404 before trying another router, so that path buffers the request/response while probing multiple candidates. `X-Gospace-Router` is therefore also the direct path for callers or CDNs that want to skip that discovery step.
+The no-header path does not buffer or replay the request body and does not execute speculative middleware. Method-specific and parameterized patterns use Go `http.ServeMux` matching semantics.
+
+## WASM runtime and cache
+
+A gospace service owns one process-level Wazero runtime and shared WASI host. Each registered WASM router owns a compiled module, while each HTTP request still receives a fresh isolated module instance.
+
+Cold compilation is collapsed by immutable `router-name + SHA-256` so concurrent requests for the same artifact share one compilation. The instance-local compiled-router cache is bounded (`64` routers by default). Recency is tracked on dispatch; the least-recently-used non-active WASM router is evicted when capacity is exceeded. Active routers are pinned, and eviction waits for in-flight request leases before closing a compiled module.
+
+A cold router always serves the request that admitted it before post-dispatch eviction can remove it. Likewise, `activate=true` establishes the new active pin before capacity enforcement runs.
 
 ## WASM router contract
 
@@ -151,11 +171,14 @@ GOOS=wasip1 GOARCH=wasm \
 
 ```text
 GET  /_gospace/routers
+GET  /_gospace/resolve?method=GET&path=/users/42
 POST /_gospace/activate/<name>
 POST /_gospace/wasm/<name>
 ```
 
-These are management/prewarming APIs. Normal route discovery does not require a registration request first.
+`/_gospace/resolve` performs a protected non-executing ownership lookup. Pyspace uses it only when it has multiple gospace backends and must decide which child owns a request before application execution.
+
+These are management/prewarming/resolution APIs. Normal route discovery does not require a separate registration request first.
 
 ## Server binary
 
@@ -178,13 +201,29 @@ or, for `pyspace-minimal`:
 
 `dash-xd/pyspace-minimal` can supervise gospace under Python 3.12 Gen 1.
 
-A normal warm request can simply flow through both catchalls:
+With one gospace backend, pyspace forwards a Python-route miss once and lets gospace's local route index resolve ownership. With multiple gospace backends, pyspace first asks each private `/_gospace/resolve` endpoint so only the owning application process executes the request.
 
 ```text
-request
-  -> pyspace Python route lookup
-  -> gospace fallback
-  -> gospace registered router lookup
+                     optional upstream/CDN hint
+                              |
+                              v
+request -----------------> pyspace
+                              |
+                    Python route lookup
+                              |
+                         miss |
+                              v
+                       gospace UDS
+                              |
+                    gospace route index
+                       /           \
+                 native           WASM
+                                   |
+                             compiled cache
+                                   |
+                          shared Wazero runtime
+                                   |
+                         fresh module/request
 ```
 
-If both layers are cold and the caller already knows the destination, the same request may additionally carry the pyspace executable hint and gospace WASM hint. Those headers accelerate/enable cold resolution; they are not required once the relevant routes are already discoverable locally.
+If both layers are cold and the caller already knows the destination, the same request may additionally carry the pyspace executable hint and gospace WASM artifact hint. Those hints accelerate or enable cold resolution; they are not required once the relevant routes are locally indexed.
