@@ -124,12 +124,16 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A router header is an optional direct path. It can avoid catchall probing
+	// and, on a cold miss, carry the artifact needed to load that router.
 	if r.Header.Get(RouterHeader) != "" {
 		s.serveHinted(w, r)
 		return
 	}
 
-	s.worker.ServeHTTP(w, r)
+	// Without a hint, discover the route from routers already present in this
+	// worker. The active router is tried first, then the remaining registrations.
+	s.serveCatchall(w, r)
 }
 
 func (s *Service) authorizeControl(r *http.Request) bool {
