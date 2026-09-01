@@ -31,6 +31,25 @@ func Activate(name string) error {
 	return Default.Activate(name)
 }
 
+// Dispatch serves one request through name without changing the active/default
+// router. Concurrent requests can independently select different routers.
+func Dispatch(name string, w http.ResponseWriter, r *http.Request) error {
+	return Default.Dispatch(name, w, r)
+}
+
+// DispatchDigest serves one request through a cached WASM router only when the
+// registered artifact matches expectedDigest.
+func DispatchDigest(name, expectedDigest string, w http.ResponseWriter, r *http.Request) error {
+	return Default.DispatchDigest(name, expectedDigest, w, r)
+}
+
+// LoadAndDispatchWASM is the self-contained cold-instance path: verify/load an
+// inline WASM router when needed and dispatch only the supplied request through
+// it, without changing the active/default router.
+func LoadAndDispatchWASM(ctx context.Context, name, expectedDigest string, module []byte, w http.ResponseWriter, r *http.Request) (digest string, loaded bool, err error) {
+	return Default.LoadAndDispatchWASM(ctx, name, expectedDigest, module, w, r)
+}
+
 // LoadWASM registers module bytes that arrive at runtime and can immediately
 // activate the resulting router. Internally this uses the same registration
 // path as RegisterWASM.
