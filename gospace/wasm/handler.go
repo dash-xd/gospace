@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 
 	"github.com/dash-xd/gospace/wasmhttp"
 	"github.com/tetratelabs/wazero"
@@ -19,23 +20,44 @@ const (
 )
 
 type Options struct {
-	MaxRequestBody   int64
-	MaxResponseBody  uint32
+	MaxRequestBody  int64
+	MaxResponseBody uint32
+}
+
+type EngineOptions struct {
 	MemoryLimitPages uint32
 }
 
-// Handler compiles a WASM router once and instantiates an isolated reactor for
-// each HTTP request. This avoids sharing mutable guest state across concurrent
-// Cloud Functions Gen 2 invocations and lets request cancellation terminate
-// only that request's guest instance.
-type Handler struct {
-	runtime         wazero.Runtime
-	compiled        wazero.CompiledModule
-	maxRequestBody  int64
-	maxResponseBody uint32
+// Engine owns the process-level wazero runtime and shared WASI host. Individual
+// routers only own compiled modules; requests still instantiate isolated guest
+// modules from those compiled artifacts.
+type Engine struct {
+	runtime wazero.Runtime
 }
 
-func NewHandler(ctx context.Context, wasmBytes []byte, options Options) (*Handler, error) {
+func NewEngine(ctx context.Context, options EngineOptions) (*Engine, error) {
+	if options.MemoryLimitPages == 0 {
+		options.MemoryLimitPages = defaultMemoryLimitPages
+	}
+	runtimeConfig := wazero.NewRuntimeConfig().
+		WithCloseOnContextDone(true).
+		WithMemoryLimitPages(options.MemoryLimitPages)
+	runtime := wazero.NewRuntimeWithConfig(ctx, runtimeConfig)
+	if _, err := wasi_snapshot_preview1.Instantiate(ctx, runtime); err != nil {
+		_ = runtime.Close(ctx)
+		return nil, fmt.Errorf("instantiate WASI: %w", err)
+	}
+	return &Engine{runtime: runtime}, nil
+}
+
+func (e *Engine) Close(ctx context.Context) error {
+	if e == nil || e.runtime == nil {
+		return nil
+	}
+	return e.runtime.Close(ctx)
+}
+
+func (e *Engine) Compile(ctx context.Context, wasmBytes []byte, options Options) (*Handler, error) {
 	if len(wasmBytes) == 0 {
 		return nil, errors.New("empty WASM module")
 	}
@@ -45,43 +67,99 @@ func NewHandler(ctx context.Context, wasmBytes []byte, options Options) (*Handle
 	if options.MaxResponseBody == 0 {
 		options.MaxResponseBody = defaultMaxBody
 	}
-	if options.MemoryLimitPages == 0 {
-		options.MemoryLimitPages = defaultMemoryLimitPages
-	}
-
-	runtimeConfig := wazero.NewRuntimeConfig().
-		WithCloseOnContextDone(true).
-		WithMemoryLimitPages(options.MemoryLimitPages)
-	runtime := wazero.NewRuntimeWithConfig(ctx, runtimeConfig)
-	ok := false
-	defer func() {
-		if !ok {
-			_ = runtime.Close(ctx)
-		}
-	}()
-
-	if _, err := wasi_snapshot_preview1.Instantiate(ctx, runtime); err != nil {
-		return nil, fmt.Errorf("instantiate WASI: %w", err)
-	}
-	compiled, err := runtime.CompileModule(ctx, wasmBytes)
+	compiled, err := e.runtime.CompileModule(ctx, wasmBytes)
 	if err != nil {
 		return nil, fmt.Errorf("compile WASM router: %w", err)
 	}
-
-	ok = true
 	return &Handler{
-		runtime:         runtime,
+		engine:          e,
 		compiled:        compiled,
 		maxRequestBody:  options.MaxRequestBody,
 		maxResponseBody: options.MaxResponseBody,
 	}, nil
 }
 
+// Handler owns one compiled router. It leases itself while requests execute so
+// cache eviction can close the compiled artifact after all in-flight requests
+// have completed.
+type Handler struct {
+	engine          *Engine
+	compiled        wazero.CompiledModule
+	maxRequestBody  int64
+	maxResponseBody uint32
+
+	mu      sync.Mutex
+	cond    *sync.Cond
+	active  int
+	closing bool
+}
+
+// NewHandler remains as a standalone convenience API. Services that host many
+// routers should create one Engine and call Engine.Compile instead.
+func NewHandler(ctx context.Context, wasmBytes []byte, options Options) (*Handler, error) {
+	engine, err := NewEngine(ctx, EngineOptions{})
+	if err != nil {
+		return nil, err
+	}
+	h, err := engine.Compile(ctx, wasmBytes, options)
+	if err != nil {
+		_ = engine.Close(ctx)
+		return nil, err
+	}
+	h.ownsEngine = true
+	return h, nil
+}
+
+// ownsEngine is only true for the compatibility NewHandler constructor.
+func (h *Handler) begin() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cond == nil {
+		h.cond = sync.NewCond(&h.mu)
+	}
+	if h.closing {
+		return false
+	}
+	h.active++
+	return true
+}
+
+func (h *Handler) end() {
+	h.mu.Lock()
+	h.active--
+	if h.closing && h.active == 0 && h.cond != nil {
+		h.cond.Broadcast()
+	}
+	h.mu.Unlock()
+}
+
 func (h *Handler) Close() error {
-	return h.runtime.Close(context.Background())
+	h.mu.Lock()
+	if h.cond == nil {
+		h.cond = sync.NewCond(&h.mu)
+	}
+	h.closing = true
+	for h.active != 0 {
+		h.cond.Wait()
+	}
+	h.mu.Unlock()
+
+	err := h.compiled.Close(context.Background())
+	if h.ownsEngine {
+		if closeErr := h.engine.Close(context.Background()); err == nil {
+			err = closeErr
+		}
+	}
+	return err
 }
 
 func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	if !h.begin() {
+		http.Error(rw, "WASM router is being evicted", http.StatusServiceUnavailable)
+		return
+	}
+	defer h.end()
+
 	body, err := readBody(req.Body, h.maxRequestBody)
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusRequestEntityTooLarge)
@@ -100,7 +178,7 @@ func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	ctx := req.Context()
-	module, err := h.runtime.InstantiateModule(ctx, h.compiled, wazero.NewModuleConfig().WithName("").WithStartFunctions("_initialize"))
+	module, err := h.engine.runtime.InstantiateModule(ctx, h.compiled, wazero.NewModuleConfig().WithName("").WithStartFunctions("_initialize"))
 	if err != nil {
 		http.Error(rw, "WASM router initialization failed", http.StatusBadGateway)
 		return
