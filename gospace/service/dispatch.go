@@ -22,6 +22,15 @@ func (s *Service) DispatchDigest(name, expectedDigest string, rw http.ResponseWr
 	return s.worker.ServeRouter(name, rw, req)
 }
 
+// dispatchThenEvict guarantees that the request which caused a cold router to
+// be admitted gets a handler lease before capacity enforcement may retire that
+// router. This is deliberately small so the bounded-cache sequencing can be
+// tested without needing a WASM compiler fixture.
+func (s *Service) dispatchThenEvict(name string, rw http.ResponseWriter, req *http.Request) error {
+	defer s.evictWASMIfNeeded()
+	return s.worker.ServeRouter(name, rw, req)
+}
+
 // LoadAndDispatchWASM preserves the original direct-only API. Call
 // LoadAndDispatchWASMRoutes when the loaded router should participate in
 // subsequent catchall route discovery.
@@ -42,8 +51,7 @@ func (s *Service) LoadAndDispatchWASMRoutes(ctx context.Context, name, expectedD
 	// compiled before bounded-cache eviction runs. This matters when every older
 	// entry is pinned (for example the active router) and the new router would
 	// otherwise be the only immediate eviction candidate.
-	defer s.evictWASMIfNeeded()
-	if err := s.worker.ServeRouter(name, rw, req); err != nil {
+	if err := s.dispatchThenEvict(name, rw, req); err != nil {
 		return digest, loaded, err
 	}
 	return digest, loaded, nil
