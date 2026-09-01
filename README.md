@@ -4,31 +4,56 @@
 
 Normal requests do not need a router header. Routers that want to participate in no-header discovery publish immutable `net/http.ServeMux`-style route metadata at registration time. Gospace matches that metadata without executing candidate application handlers, then executes exactly one selected router. A hint remains an optional direct shortcut when the caller already knows the router, or when a cold request carries the WASM artifact needed to load it.
 
-## Native router
+## Native router composition
+
+Gospace does not ship application-specific native routers. The runtime contract is deliberately small:
 
 ```go
-package myrouter
-
-import (
-    "net/http"
-    "github.com/dash-xd/gospace/registry"
-)
-
-func init() {
-    mux := http.NewServeMux()
-    mux.HandleFunc("GET /hello", func(w http.ResponseWriter, _ *http.Request) {
-        _, _ = w.Write([]byte("hello"))
-    })
-    if err := registry.RegisterRoutes("hello-v1", mux, []string{"GET /hello"}); err != nil {
-        panic(err)
-    }
+type NativeRouter struct {
+    Name    string
+    Handler http.Handler
+    Routes  []string
 }
 ```
 
-Once registered, this works without a hint:
+Application packages own construction of their ordinary `http.Handler`. A deployment-owned composition file imports whichever packages belong in that gospace binary and supplies their top-level route ownership.
+
+For example, packages such as `xd-dash/news/router` and `xd-dash/stonks/router` already expose `NewRouter() http.Handler`. A composed deployment can mount them without gospace knowing anything about their implementations:
+
+```go
+package function
+
+import (
+    "net/http"
+
+    "github.com/dash-xd/gospace/registry"
+    newsrouter "github.com/xd-dash/news/router"
+    stonksrouter "github.com/xd-dash/stonks/router"
+)
+
+func init() {
+    registry.MustCompose(
+        registry.NativeRouter{
+            Name:    "news-v1",
+            Handler: http.StripPrefix("/news", newsrouter.NewRouter()),
+            Routes:  []string{"POST /news/stream"},
+        },
+        registry.NativeRouter{
+            Name:    "stonks-v1",
+            Handler: http.StripPrefix("/stonks", stonksrouter.NewRouter()),
+            Routes:  []string{"POST /stonks/stream"},
+        },
+    )
+}
+```
+
+The external packages are normal Go dependencies selected by the composed build. Gospace itself has no imports of `news`, `stonks`, Logma, or any other application router.
+
+Once composed, these work without a gospace routing hint:
 
 ```http
-GET /hello
+POST /news/stream
+POST /stonks/stream
 ```
 
 Route ownership is resolved from the declared patterns only; gospace does not call unrelated handlers and interpret their 404s as misses. Conflicting ownership metadata is rejected during registration using Go `http.ServeMux` pattern semantics.
@@ -36,11 +61,13 @@ Route ownership is resolved from the declared patterns only; gospace does not ca
 If the caller already knows the target, it can bypass the route index:
 
 ```http
-GET /hello
-X-Gospace-Router: hello-v1
+POST /news/stream
+X-Gospace-Router: news-v1
 ```
 
-`Register` remains available for direct-only routers that should not participate in catchall discovery.
+`registry.Compose` returns registration errors. `registry.MustCompose` is the convenience form for an `init`-time composition file where an invalid or conflicting deployment should fail startup. A `NativeRouter` with no `Routes` is valid and direct-only: it can be reached with `X-Gospace-Router`, but gospace will not infer ownership by executing it.
+
+Individual packages can also register directly with `RegisterRoutes` when that is more convenient, but composition belongs outside gospace's runtime implementation.
 
 ## Pre-register WASM
 
@@ -196,6 +223,8 @@ or, for `pyspace-minimal`:
 ```sh
 ./gospace -unix-socket /tmp/pyspace/gospace.sock
 ```
+
+The stock server binary contains no application routers. A deployment that wants statically linked native routers composes them into its build with a file like the example above; lazy WASM remains available independently at runtime.
 
 ## Pyspace Gen 1 host
 
