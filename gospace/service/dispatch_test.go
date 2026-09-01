@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -32,6 +33,32 @@ func TestDispatchDoesNotChangeActiveRouter(t *testing.T) {
 	}
 	if got := s.Active(); got != "default" {
 		t.Fatalf("active router = %q, want default", got)
+	}
+}
+
+func TestDispatchDigestRejectsWrongArtifact(t *testing.T) {
+	s := NewWithOptions(Options{})
+	called := false
+	if err := s.RegisterFunc("wasm-v1", func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		_, _ = w.Write([]byte("ok"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The dispatch path only needs the immutable service-level association;
+	// RegisterWASM is covered separately by WASM integration tests.
+	s.wasmMu.Lock()
+	s.wasmDigests["wasm-v1"] = "abc123"
+	s.wasmMu.Unlock()
+
+	rr := httptest.NewRecorder()
+	err := s.DispatchDigest("wasm-v1", "different", rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	if !errors.Is(err, ErrRouterDigestMismatch) {
+		t.Fatalf("error = %v, want ErrRouterDigestMismatch", err)
+	}
+	if called {
+		t.Fatal("handler ran despite digest mismatch")
 	}
 }
 
