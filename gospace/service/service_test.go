@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"testing"
 
 	"github.com/dash-xd/gospace/wasmhttp"
@@ -77,9 +78,9 @@ func TestColdHintIsOneRequestAndRequiresAuthorization(t *testing.T) {
 
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
-	h := make(textprotoMIMEHeader)
+	h := make(textproto.MIMEHeader)
 	h.Set("Content-Type", requestPartType)
-	part, err := mw.CreatePart(http.Header(h))
+	part, err := mw.CreatePart(h)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,10 +102,6 @@ func TestColdHintIsOneRequestAndRequiresAuthorization(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
 	}
 }
-
-type textprotoMIMEHeader map[string][]string
-
-func (h textprotoMIMEHeader) Set(key, value string) { h[key] = []string{value} }
 
 func TestRegisterWASMUsesServiceModuleLimit(t *testing.T) {
 	s := NewWithOptions(Options{MaxWASMBytes: 4})
