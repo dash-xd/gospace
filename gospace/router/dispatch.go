@@ -3,23 +3,31 @@ package router
 import "net/http"
 
 // Handler returns an immutable registered handler by name without changing the
-// worker's globally active/default router. This is the primitive used by
-// request-scoped dispatchers that need to select a router for one request.
+// worker's active/default router. Callers should use ServeRouter when executing
+// it so cache eviction can wait for in-flight requests safely.
 func (w *Worker) Handler(name string) (http.Handler, bool) {
 	w.mu.RLock()
-	handler, ok := w.handlers[name]
+	entry, ok := w.handlers[name]
 	w.mu.RUnlock()
-	return handler, ok
+	if !ok {
+		return nil, false
+	}
+	return entry.handler, true
 }
 
 // ServeRouter dispatches one request to a named registered router without
-// mutating the worker's active/default router. Concurrent requests may safely
-// select different immutable routers.
+// mutating the active/default router. A short lease keeps eviction from closing
+// the handler while this request is running.
 func (w *Worker) ServeRouter(name string, rw http.ResponseWriter, req *http.Request) error {
-	handler, ok := w.Handler(name)
-	if !ok {
+	w.mu.RLock()
+	entry, ok := w.handlers[name]
+	if !ok || !entry.acquire() {
+		w.mu.RUnlock()
 		return ErrUnknownRouter
 	}
-	handler.ServeHTTP(rw, req)
+	w.mu.RUnlock()
+	defer entry.release()
+
+	entry.handler.ServeHTTP(rw, req)
 	return nil
 }
