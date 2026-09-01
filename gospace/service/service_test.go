@@ -21,24 +21,16 @@ func controlRequest(method, target string) *http.Request {
 	return r
 }
 
-func TestCatchallFindsRegisteredRouteWithoutRouterHint(t *testing.T) {
+func TestCatchallFindsDeclaredRouteWithoutRouterHint(t *testing.T) {
 	s := NewWithOptions(Options{})
-	if err := s.Register("one", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/one" {
-			http.NotFound(w, r)
-			return
-		}
+	if err := s.RegisterRoutes("one", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("one"))
-	})); err != nil {
+	}), []string{"GET /one"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Register("two", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/two" {
-			http.NotFound(w, r)
-			return
-		}
+	if err := s.RegisterRoutes("two", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("two"))
-	})); err != nil {
+	}), []string{"GET /two"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -49,24 +41,26 @@ func TestCatchallFindsRegisteredRouteWithoutRouterHint(t *testing.T) {
 	}
 }
 
-func TestActiveRouterIsPreferredWhenRoutesOverlap(t *testing.T) {
+func TestCatchallUsesDeclaredSpecificityInsteadOfActiveProbeOrder(t *testing.T) {
 	s := NewWithOptions(Options{})
-	for _, name := range []string{"a", "b"} {
-		name := name
-		if err := s.Register(name, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			_, _ = w.Write([]byte(name))
-		})); err != nil {
-			t.Fatal(err)
-		}
+	if err := s.RegisterRoutes("subtree", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("subtree"))
+	}), []string{"GET /same/"}); err != nil {
+		t.Fatal(err)
 	}
-	if err := s.Activate("b"); err != nil {
+	if err := s.RegisterRoutes("exact", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("exact"))
+	}), []string{"GET /same"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Activate("subtree"); err != nil {
 		t.Fatal(err)
 	}
 
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/same", nil))
-	if rr.Body.String() != "b" {
-		t.Fatalf("body = %q, want b", rr.Body.String())
+	if rr.Body.String() != "exact" {
+		t.Fatalf("body = %q, want exact", rr.Body.String())
 	}
 }
 
