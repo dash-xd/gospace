@@ -116,7 +116,6 @@ func (s *Service) registerWASM(ctx context.Context, name string, module []byte, 
 	return digest, nil
 }
 
-// WASMDigest returns the SHA-256 digest recorded for a WASM-backed router.
 func (s *Service) WASMDigest(name string) (digest string, ok bool) {
 	s.wasm.mu.RLock()
 	entry, ok := s.wasm.entries[name]
@@ -176,15 +175,20 @@ func sameStrings(a, b []string) bool {
 
 func (s *Service) ensureWASM(ctx context.Context, name, expectedDigest string, module []byte, patterns []string) (string, bool, error) {
 	if _, ok := s.worker.Handler(name); ok {
-		if err := s.requireWASMDigest(name, expectedDigest); err != nil {
-			return "", false, err
+		// A handler becomes visible immediately before its cache metadata is
+		// published. Treat it as fully cached only once the digest record is also
+		// visible; otherwise fall through to the name+digest singleflight below,
+		// whose leader owns the publication in progress.
+		if digest, published := s.WASMDigest(name); published {
+			if expectedDigest != "" && digest != expectedDigest {
+				return "", false, fmt.Errorf("%w: router %q has %q, want %q", ErrRouterDigestMismatch, name, digest, expectedDigest)
+			}
+			if err := s.requireRoutes(name, patterns); err != nil {
+				return "", false, err
+			}
+			s.touchWASM(name)
+			return digest, false, nil
 		}
-		if err := s.requireRoutes(name, patterns); err != nil {
-			return "", false, err
-		}
-		digest, _ := s.WASMDigest(name)
-		s.touchWASM(name)
-		return digest, false, nil
 	}
 
 	actual := wasmDigest(module)
@@ -194,14 +198,15 @@ func (s *Service) ensureWASM(ctx context.Context, name, expectedDigest string, m
 	key := name + ":" + actual
 	result, shared, err := s.loads.Do(key, func() (loadResult, error) {
 		if _, ok := s.worker.Handler(name); ok {
-			if err := s.requireWASMDigest(name, expectedDigest); err != nil {
-				return loadResult{}, err
+			if digest, published := s.WASMDigest(name); published {
+				if expectedDigest != "" && digest != expectedDigest {
+					return loadResult{}, fmt.Errorf("%w: router %q has %q, want %q", ErrRouterDigestMismatch, name, digest, expectedDigest)
+				}
+				if err := s.requireRoutes(name, patterns); err != nil {
+					return loadResult{}, err
+				}
+				return loadResult{digest: digest}, nil
 			}
-			if err := s.requireRoutes(name, patterns); err != nil {
-				return loadResult{}, err
-			}
-			digest, _ := s.WASMDigest(name)
-			return loadResult{digest: digest}, nil
 		}
 		digest, err := s.registerWASM(context.WithoutCancel(ctx), name, module, patterns)
 		if err != nil {
@@ -277,7 +282,6 @@ func splitRoutePatterns(value string) []string {
 	return out
 }
 
-// resolveTarget is useful to callers that need non-executing route ownership.
 func (s *Service) resolveTarget(r *http.Request) (string, bool) {
 	return s.worker.Match(r)
 }
