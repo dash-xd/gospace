@@ -1,200 +1,147 @@
 # gospace
 
-`gospace` is a stable Go HTTP worker whose routers can be native Go handlers, pre-registered WASM, or WASM loaded lazily.
+`gospace` is a generic Go HTTP runtime for a deployment-composed native `http.Handler` plus pre-registered or lazily loaded WASM routers.
 
-Normal requests do not need a router header. Routers that want to participate in no-header discovery publish immutable `net/http.ServeMux`-style route metadata at registration time. Gospace matches that metadata without executing candidate application handlers, then executes exactly one selected router. A hint remains an optional direct shortcut when the caller already knows the router, or when a cold request carries the WASM artifact needed to load it.
+The stock runtime contains no application-specific native routers. A build may supply one ordinary Go handler, or `nil` for no native application at all.
 
-## Native router composition
+## Native composition
 
-Gospace does not ship application-specific native routers. The runtime contract is deliberately small:
+The native contract is deliberately just `net/http`:
 
 ```go
-type NativeRouter struct {
-    Name    string
-    Handler http.Handler
-    Routes  []string
+app := server.New(nativeHandler)
+```
+
+`nativeHandler` may be any `http.Handler`: `http.ServeMux`, Chi, a router returned by another package, or a mux composed from many external packages. Gospace does not need names, route manifests, or application-specific registration wrappers for this side.
+
+```go
+func nativeRouter() http.Handler {
+    mux := http.NewServeMux()
+    mux.Handle("/news/", http.StripPrefix("/news", newsrouter.NewRouter()))
+    mux.Handle("/stonks/", http.StripPrefix("/stonks", stonksrouter.NewRouter()))
+    return mux
+}
+
+func main() {
+    app := server.New(nativeRouter())
+    log.Fatal(http.ListenAndServe(":8080", app))
 }
 ```
 
-Application packages own construction of their ordinary `http.Handler`. A deployment-owned composition file imports whichever packages belong in that gospace binary and supplies their top-level route ownership.
+The imports above belong to the deployment build, not to gospace. Packages such as `xd-dash/news/router` and `xd-dash/stonks/router` already expose ordinary `NewRouter() http.Handler` constructors, so they can be composed with normal Go mechanisms.
 
-For example, packages such as `xd-dash/news/router` and `xd-dash/stonks/router` already expose `NewRouter() http.Handler`. A composed deployment can mount them without gospace knowing anything about their implementations:
+`server.New(nil)` is the generic/default form. It substitutes `http.NotFoundHandler()` for the native side while keeping dynamic WASM loading available.
 
-```go
-package function
+## Request resolution
 
-import (
-    "net/http"
+Without an explicit router hint:
 
-    "github.com/dash-xd/gospace/registry"
-    newsrouter "github.com/xd-dash/news/router"
-    stonksrouter "github.com/xd-dash/stonks/router"
-)
-
-func init() {
-    registry.MustCompose(
-        registry.NativeRouter{
-            Name:    "news-v1",
-            Handler: http.StripPrefix("/news", newsrouter.NewRouter()),
-            Routes:  []string{"POST /news/stream"},
-        },
-        registry.NativeRouter{
-            Name:    "stonks-v1",
-            Handler: http.StripPrefix("/stonks", stonksrouter.NewRouter()),
-            Routes:  []string{"POST /stonks/stream"},
-        },
-    )
-}
+```text
+request
+  -> gospace-managed route index
+       -> registered/preloaded/runtime WASM or explicitly indexed handler
+  -> miss
+       -> deployment-composed native http.Handler
+  -> native 404 if unmatched
 ```
 
-The external packages are normal Go dependencies selected by the composed build. Gospace itself has no imports of `news`, `stonks`, Logma, or any other application router.
+Gospace never executes the native handler to discover ownership and never probes several native applications. The deployment's own mux performs native routing exactly once. Gospace-managed dynamic routes still use immutable `net/http.ServeMux`-style ownership metadata so WASM dispatch remains non-executing and deterministic.
 
-Once composed, these work without a gospace routing hint:
-
-```http
-POST /news/stream
-POST /stonks/stream
-```
-
-Route ownership is resolved from the declared patterns only; gospace does not call unrelated handlers and interpret their 404s as misses. Conflicting ownership metadata is rejected during registration using Go `http.ServeMux` pattern semantics.
-
-If the caller already knows the target, it can bypass the route index:
-
-```http
-POST /news/stream
-X-Gospace-Router: news-v1
-```
-
-`registry.Compose` returns registration errors. `registry.MustCompose` is the convenience form for an `init`-time composition file where an invalid or conflicting deployment should fail startup. A `NativeRouter` with no `Routes` is valid and direct-only: it can be reached with `X-Gospace-Router`, but gospace will not infer ownership by executing it.
-
-Individual packages can also register directly with `RegisterRoutes` when that is more convenient, but composition belongs outside gospace's runtime implementation.
+With `X-Gospace-Router`, the request goes directly to that named gospace-managed router. This remains useful for dynamically loaded WASM and other explicitly registered runtime routers.
 
 ## Pre-register WASM
 
+A build can populate WASM before serving requests:
+
 ```go
-package bundled
-
-import (
-    _ "embed"
-    "github.com/dash-xd/gospace/registry"
-)
-
-//go:embed router.wasm
-var module []byte
-
-func init() {
-    if _, err := registry.RegisterWASMRoutes(
-        "users-v1",
-        module,
-        []string{"GET /users/{id}"},
-    ); err != nil {
-        panic(err)
-    }
+app := server.New(nativeRouter())
+module, err := os.ReadFile("router.wasm")
+if err != nil {
+    log.Fatal(err)
+}
+if _, err := app.RegisterWASMRoutes(
+    context.Background(),
+    "users-v1",
+    module,
+    []string{"GET /users/{id}"},
+); err != nil {
+    log.Fatal(err)
 }
 ```
 
-After registration, an ordinary request is resolved through the same route index:
-
-```http
-GET /users/42
-```
-
-`RegisterWASM` remains the direct-only form when no route metadata is desired.
+The registered WASM route participates in gospace's ownership index and takes precedence over the native fallback for its declared route.
 
 ## Cold WASM hint
 
-A router that is not present yet still needs its artifact. When the caller already knows it is a cold WASM route, one `multipart/related` request can carry the raw module, immutable route manifest, and application request:
-
-```http
-POST /
-X-Gospace-Router: users-v1
-X-Gospace-Router-SHA256: <sha256>
-X-Gospace-Control-Token: <GOSPACE_CONTROL_TOKEN>
-Content-Type: multipart/related; boundary=gospace
-
---gospace
-Content-Type: application/wasm
-
-<raw router.wasm bytes>
---gospace
-Content-Type: application/vnd.gospace.routes+json
-
-{"patterns":["GET /users/{id}"]}
---gospace
-Content-Type: application/vnd.gospace.request+json
-
-{
-  "method": "GET",
-  "url": "/users/42",
-  "host": "example",
-  "header": {},
-  "body": null
-}
---gospace--
-```
-
-That one request verifies the SHA-256, singleflights concurrent compilation for the same immutable `name+digest`, publishes route ownership, and executes the original application request. It does not globally activate the router.
-
-Afterward, while the compiled router remains in the instance-local cache, the route can be discovered normally:
-
-```http
-GET /users/99
-```
-
-or selected directly:
-
-```http
-GET /users/99
-X-Gospace-Router: users-v1
-X-Gospace-Router-SHA256: <sha256>
-```
-
-## Resolution order
+A missing WASM router can still be supplied and executed in one `multipart/related` request containing:
 
 ```text
-X-Gospace-Router supplied
-    -> direct registered router
-    -> cold WASM load from this request if missing
-
-otherwise
-    -> non-executing route-index match
-    -> exactly one native/WASM router
-    -> 404
+application/wasm
+application/vnd.gospace.routes+json
+application/vnd.gospace.request+json
 ```
 
-The no-header path does not buffer or replay the request body and does not execute speculative middleware. Method-specific and parameterized patterns use Go `http.ServeMux` matching semantics.
+with:
 
-## WASM runtime and cache
-
-A gospace service owns one process-level Wazero runtime and shared WASI host. Each registered WASM router owns a compiled module, while each HTTP request still receives a fresh isolated module instance.
-
-Cold compilation is collapsed by immutable `router-name + SHA-256` so concurrent requests for the same artifact share one compilation. The instance-local compiled-router cache is bounded (`64` routers by default). Recency is tracked on dispatch; the least-recently-used non-active WASM router is evicted when capacity is exceeded. Active routers are pinned, and eviction waits for in-flight request leases before closing a compiled module.
-
-A cold router always serves the request that admitted it before post-dispatch eviction can remove it. Likewise, `activate=true` establishes the new active pin before capacity enforcement runs.
-
-## WASM router contract
-
-A Go WASI router exports:
-
-```text
-gospace_alloc(size uint32) unsafe.Pointer
-gospace_handle() unsafe.Pointer
-gospace_response_len() uint32
+```http
+X-Gospace-Router: users-v1
+X-Gospace-Router-SHA256: <sha256>
+X-Gospace-Control-Token: <token>
 ```
 
-`wasmguest` adapts an ordinary `net/http.Handler` to those exports, so router code can use Chi, `http.ServeMux`, and normal middleware.
+Gospace verifies the digest, singleflights compilation by immutable `name+digest`, publishes route ownership, executes the original application request, and keeps the compiled router in the bounded instance-local cache when capacity permits.
 
-The included Chi example builds with:
+## WASM runtime/cache
+
+One gospace service owns one shared Wazero runtime/WASI host. Each WASM router owns a compiled module, while each request receives a fresh module instance.
+
+The compiled-router cache defaults to 64 routers. Recency is updated on dispatch; the least-recently-used non-active router is evicted when the bound is exceeded. Active routers are pinned, and eviction waits for in-flight leases before closing compiled modules. A newly admitted cold router serves its triggering request before eviction is enforced.
+
+## Server package
+
+`github.com/dash-xd/gospace/server` is the intended build-time composition surface:
+
+```go
+server.New(native http.Handler) *service.Service
+server.NewWithOptions(native http.Handler, options server.Options) *service.Service
+```
+
+The returned service is itself an `http.Handler` and also exposes WASM registration/activation APIs.
+
+The shipped standalone binary is simply the empty form:
 
 ```sh
-cd examples/wasm-chi
-GOOS=wasip1 GOARCH=wasm \
-  go build -buildmode=c-shared -o router.wasm .
+cd gospace
+go build -o gospace ./cmd/api
+./gospace -port 6060
 ```
+
+or over the private Unix socket used by pyspace:
+
+```sh
+./gospace -unix-socket /tmp/pyspace/gospace.sock
+```
+
+The stock Gen 2 Cloud Function entrypoint likewise uses `server.New(nil)`. A composed Cloud Function should build its own entry package and call `server.New(nativeHandler)`.
+
+## Examples
+
+Idiomatic executable examples live under `gospace/examples/`:
+
+```text
+examples/empty/         generic runtime, no native application
+examples/native/        ordinary net/http native composition
+examples/preload-wasm/  pre-register a WASM router before serving
+examples/external/      composition shape for external news/stonks packages
+```
+
+The external example is build-tagged because those application dependencies intentionally do not belong in gospace's module dependency graph.
+
+The WASM guest example remains under the repository-level `examples/wasm-chi/` because it is a separate WASI module/build.
 
 ## Explicit control API
 
-`GOSPACE_CONTROL_TOKEN` enables:
+When `GOSPACE_CONTROL_TOKEN` is configured:
 
 ```text
 GET  /_gospace/routers
@@ -203,56 +150,4 @@ POST /_gospace/activate/<name>
 POST /_gospace/wasm/<name>
 ```
 
-`/_gospace/resolve` performs a protected non-executing ownership lookup. Pyspace uses it only when it has multiple gospace backends and must decide which child owns a request before application execution.
-
-These are management/prewarming/resolution APIs. Normal route discovery does not require a separate registration request first.
-
-## Server binary
-
-```sh
-cd gospace
-go build -o gospace ./cmd/api
-```
-
-```sh
-./gospace -port 6060
-```
-
-or, for `pyspace-minimal`:
-
-```sh
-./gospace -unix-socket /tmp/pyspace/gospace.sock
-```
-
-The stock server binary contains no application routers. A deployment that wants statically linked native routers composes them into its build with a file like the example above; lazy WASM remains available independently at runtime.
-
-## Pyspace Gen 1 host
-
-`dash-xd/pyspace-minimal` can supervise gospace under Python 3.12 Gen 1.
-
-With one gospace backend, pyspace forwards a Python-route miss once and lets gospace's local route index resolve ownership. With multiple gospace backends, pyspace first asks each private `/_gospace/resolve` endpoint so only the owning application process executes the request.
-
-```text
-                     optional upstream/CDN hint
-                              |
-                              v
-request -----------------> pyspace
-                              |
-                    Python route lookup
-                              |
-                         miss |
-                              v
-                       gospace UDS
-                              |
-                    gospace route index
-                       /           \
-                 native           WASM
-                                   |
-                             compiled cache
-                                   |
-                          shared Wazero runtime
-                                   |
-                         fresh module/request
-```
-
-If both layers are cold and the caller already knows the destination, the same request may additionally carry the pyspace executable hint and gospace WASM artifact hint. Those hints accelerate or enable cold resolution; they are not required once the relevant routes are locally indexed.
+`/_gospace/resolve` is a non-executing lookup for gospace-managed indexed routes. The native fallback is intentionally opaque to this resolver because its internal routing belongs to the composed Go handler itself.
