@@ -64,6 +64,59 @@ func TestCatchallUsesDeclaredSpecificityInsteadOfActiveProbeOrder(t *testing.T) 
 	}
 }
 
+func TestUnmatchedRequestDelegatesToNativeHandlerOnce(t *testing.T) {
+	calls := 0
+	native := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Header.Get(RouterHeader) != "" {
+			t.Fatal("gospace router hint leaked into native handler")
+		}
+		_, _ = w.Write([]byte("native:" + r.URL.Path))
+	})
+	s := NewWithOptions(Options{Native: native})
+
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/native", bytes.NewBufferString("payload")))
+	if rr.Code != http.StatusOK || rr.Body.String() != "native:/native" {
+		t.Fatalf("status/body = %d %q", rr.Code, rr.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("native handler calls = %d, want 1", calls)
+	}
+}
+
+func TestIndexedGospaceRoutePrecedesNativeFallback(t *testing.T) {
+	nativeCalls := 0
+	native := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		nativeCalls++
+		_, _ = w.Write([]byte("native"))
+	})
+	s := NewWithOptions(Options{Native: native})
+	if err := s.RegisterRoutes("dynamic", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("dynamic"))
+	}), []string{"POST /owned"}); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/owned", bytes.NewBufferString("body")))
+	if rr.Code != http.StatusOK || rr.Body.String() != "dynamic" {
+		t.Fatalf("status/body = %d %q, want 200 dynamic", rr.Code, rr.Body.String())
+	}
+	if nativeCalls != 0 {
+		t.Fatalf("native handler executed for indexed route: %d calls", nativeCalls)
+	}
+}
+
+func TestNilNativeDefaultsToNotFound(t *testing.T) {
+	s := NewWithOptions(Options{})
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/missing", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
 func TestHintedRequestDispatchesNamedRouterWithoutActivation(t *testing.T) {
 	s := NewWithOptions(Options{})
 	if err := s.Register("hinted", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
