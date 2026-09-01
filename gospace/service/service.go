@@ -34,11 +34,11 @@ type Service struct {
 	controlToken string
 	maxWASM      int64
 
-	wasmEngine     *wasmrouter.Engine
-	wasmEngineErr  error
-	maxWASMRouters int
-	wasm           wasmRegistry
-	loads          loadGroup
+	wasmEngine      *wasmrouter.Engine
+	wasmEngineErr   error
+	maxWASMRouters  int
+	wasm            wasmRegistry
+	loads           loadGroup
 }
 
 func New() *Service {
@@ -109,6 +109,18 @@ func (s *Service) Activate(name string) error {
 
 func (s *Service) Active() string { return s.worker.Active() }
 
+// activateThenEvict pins the new active router before capacity enforcement. If
+// the cache is already full, this prevents admission from immediately evicting
+// the router the caller is trying to activate.
+func (s *Service) activateThenEvict(name string) error {
+	if err := s.worker.Activate(name); err != nil {
+		s.evictWASMIfNeeded()
+		return err
+	}
+	s.evictWASMIfNeeded()
+	return nil
+}
+
 func (s *Service) LoadWASM(ctx context.Context, name string, module []byte, activate bool) (string, error) {
 	return s.LoadWASMRoutes(ctx, name, module, nil, activate)
 }
@@ -123,12 +135,12 @@ func (s *Service) LoadWASMRoutes(ctx context.Context, name string, module []byte
 		return "", err
 	}
 	if activate {
-		if err := s.worker.Activate(name); err != nil {
-			s.evictWASMIfNeeded()
+		if err := s.activateThenEvict(name); err != nil {
 			return "", err
 		}
+	} else {
+		s.evictWASMIfNeeded()
 	}
-	s.evictWASMIfNeeded()
 	return digest, nil
 }
 
