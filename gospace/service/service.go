@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/dash-xd/gospace/router"
 	wasmrouter "github.com/dash-xd/gospace/wasm"
@@ -33,6 +34,8 @@ type Service struct {
 	control      *http.ServeMux
 	controlToken string
 	maxWASM      int64
+	wasmMu       sync.RWMutex
+	wasmDigests  map[string]string
 }
 
 func New() *Service {
@@ -48,6 +51,7 @@ func NewWithOptions(options Options) *Service {
 		worker:       router.NewWorker(),
 		controlToken: options.ControlToken,
 		maxWASM:      options.MaxWASMBytes,
+		wasmDigests:  make(map[string]string),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /_gospace/routers", s.listRouters)
@@ -77,6 +81,9 @@ func (s *Service) RegisterWASM(ctx context.Context, name string, module []byte) 
 		return "", fmt.Errorf("WASM module exceeds %d bytes", s.maxWASM)
 	}
 
+	sum := sha256.Sum256(module)
+	digest := hex.EncodeToString(sum[:])
+
 	h, err := wasmrouter.NewHandler(ctx, module, wasmrouter.Options{})
 	if err != nil {
 		return "", err
@@ -86,8 +93,10 @@ func (s *Service) RegisterWASM(ctx context.Context, name string, module []byte) 
 		return "", err
 	}
 
-	sum := sha256.Sum256(module)
-	return hex.EncodeToString(sum[:]), nil
+	s.wasmMu.Lock()
+	s.wasmDigests[name] = digest
+	s.wasmMu.Unlock()
+	return digest, nil
 }
 
 func (s *Service) Activate(name string) error {
