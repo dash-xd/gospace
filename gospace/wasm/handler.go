@@ -87,6 +87,7 @@ type Handler struct {
 	compiled        wazero.CompiledModule
 	maxRequestBody  int64
 	maxResponseBody uint32
+	ownsEngine      bool
 
 	mu      sync.Mutex
 	cond    *sync.Cond
@@ -110,7 +111,6 @@ func NewHandler(ctx context.Context, wasmBytes []byte, options Options) (*Handle
 	return h, nil
 }
 
-// ownsEngine is only true for the compatibility NewHandler constructor.
 func (h *Handler) begin() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
