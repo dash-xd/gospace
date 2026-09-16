@@ -50,15 +50,20 @@ func (h *Handler) begin() bool { h.mu.Lock(); defer h.mu.Unlock(); if h.cond==ni
 func (h *Handler) end(){ h.mu.Lock(); h.active--; if h.closing&&h.active==0&&h.cond!=nil{h.cond.Broadcast()}; h.mu.Unlock() }
 func (h *Handler) Close() error { h.mu.Lock(); if h.cond==nil{h.cond=sync.NewCond(&h.mu)}; h.closing=true; for h.active!=0{h.cond.Wait()}; h.mu.Unlock(); err:=h.compiled.Close(context.Background()); if h.ownsEngine { if closeErr:=h.engine.Close(context.Background()); err==nil{err=closeErr} }; return err }
 
+func abiCallError(rw http.ResponseWriter, stage string, err error, results []uint64) {
+	if err != nil { http.Error(rw, fmt.Sprintf("WASM %s failed: %v", stage, err), http.StatusBadGateway); return }
+	http.Error(rw, fmt.Sprintf("WASM %s returned %d results, want 1", stage, len(results)), http.StatusBadGateway)
+}
+
 func (h *Handler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	if !h.begin(){http.Error(rw,"WASM router is being evicted",http.StatusServiceUnavailable);return}; defer h.end()
 	body,err:=readBody(req.Body,h.maxRequestBody); if err!=nil{http.Error(rw,err.Error(),http.StatusRequestEntityTooLarge);return}
 	payload:=wasmhttp.EncodeRequest(wasmhttp.Request{Method:req.Method,URL:req.URL.RequestURI(),Host:req.Host,Header:req.Header,Body:body})
-	ctx:=req.Context(); module,err:=h.engine.runtime.InstantiateModule(ctx,h.compiled,wazero.NewModuleConfig().WithName("").WithStartFunctions("_initialize")); if err!=nil{http.Error(rw,"WASM router initialization failed",http.StatusBadGateway);return}; defer module.Close(context.Background())
+	ctx:=req.Context(); module,err:=h.engine.runtime.InstantiateModule(ctx,h.compiled,wazero.NewModuleConfig().WithName("").WithStartFunctions("_initialize")); if err!=nil{http.Error(rw,"WASM router initialization failed: "+err.Error(),http.StatusBadGateway);return}; defer module.Close(context.Background())
 	alloc:=module.ExportedFunction("gospace_alloc"); handle:=module.ExportedFunction("gospace_handle"); responseLenFn:=module.ExportedFunction("gospace_response_len"); if alloc==nil||handle==nil||responseLenFn==nil{http.Error(rw,"WASM router has an incompatible gospace ABI",http.StatusBadGateway);return}
-	allocResult,err:=alloc.Call(ctx,uint64(uint32(len(payload)))); if err!=nil||len(allocResult)!=1{http.Error(rw,"WASM request allocation failed",http.StatusBadGateway);return}; requestPtr:=uint32(allocResult[0]); if len(payload)!=0&&!module.Memory().Write(requestPtr,payload){http.Error(rw,"WASM request memory write failed",http.StatusBadGateway);return}
-	handleResult,err:=handle.Call(ctx); if err!=nil||len(handleResult)!=1{http.Error(rw,"WASM router execution failed",http.StatusBadGateway);return}; responsePtr:=uint32(handleResult[0])
-	lenResult,err:=responseLenFn.Call(ctx); if err!=nil||len(lenResult)!=1{http.Error(rw,"WASM response length failed",http.StatusBadGateway);return}; responseLen:=uint32(lenResult[0]); if responseLen>h.maxResponseBody{http.Error(rw,"WASM response exceeds configured limit",http.StatusBadGateway);return}
+	allocResult,err:=alloc.Call(ctx,uint64(uint32(len(payload)))); if err!=nil||len(allocResult)!=1{abiCallError(rw,"request allocation",err,allocResult);return}; requestPtr:=uint32(allocResult[0]); if len(payload)!=0&&!module.Memory().Write(requestPtr,payload){http.Error(rw,"WASM request memory write failed",http.StatusBadGateway);return}
+	handleResult,err:=handle.Call(ctx); if err!=nil||len(handleResult)!=1{abiCallError(rw,"router execution",err,handleResult);return}; responsePtr:=uint32(handleResult[0])
+	lenResult,err:=responseLenFn.Call(ctx); if err!=nil||len(lenResult)!=1{abiCallError(rw,"response length",err,lenResult);return}; responseLen:=uint32(lenResult[0]); if responseLen>h.maxResponseBody{http.Error(rw,"WASM response exceeds configured limit",http.StatusBadGateway);return}
 	encoded,ok:=module.Memory().Read(responsePtr,responseLen); if !ok{http.Error(rw,"WASM response memory read failed",http.StatusBadGateway);return}
 	response,err:=wasmhttp.DecodeResponse(encoded); if err!=nil{http.Error(rw,"invalid WASM response",http.StatusBadGateway);return}
 	for key,values:=range response.Header{for _,value:=range values{rw.Header().Add(key,value)}}; status:=response.Status; if status<100||status>999{status=http.StatusOK}; rw.WriteHeader(status); _,_=rw.Write(response.Body)
