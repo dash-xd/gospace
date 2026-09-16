@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/http"
-	"unsafe"
 
 	"github.com/dash-xd/gospace/wasmguest"
 	"github.com/go-chi/chi/v5"
@@ -22,12 +21,12 @@ func newRouter() http.Handler {
 }
 
 //go:wasmexport gospace_alloc
-func gospaceAlloc(size uint32) unsafe.Pointer {
+func gospaceAlloc(size uint32) uint32 {
 	return wasmguest.Alloc(size)
 }
 
 //go:wasmexport gospace_handle
-func gospaceHandle() unsafe.Pointer {
+func gospaceHandle() uint32 {
 	return wasmguest.Handle(handler)
 }
 

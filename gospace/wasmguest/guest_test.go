@@ -1,7 +1,6 @@
 package wasmguest
 
 import (
-	"encoding/json"
 	"net/http"
 	"testing"
 	"unsafe"
@@ -16,29 +15,23 @@ func TestHandleAdaptsServeMux(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte(r.PathValue("id")))
 	})
-
-	encoded, err := json.Marshal(wasmhttp.Request{
+	input = wasmhttp.EncodeRequest(wasmhttp.Request{
 		Method: http.MethodGet,
 		URL:    "/users/42?source=test",
 		Host:   "example.test",
-		Header: map[string][]string{"X-Test": {"1"}},
+		Header: http.Header{"X-Test": {"1"}},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	input = encoded
-
-	ptr := Handle(mux)
+	offset := Handle(mux)
 	size := ResponseLen()
-	if ptr == nil || size == 0 {
+	if offset == 0 || size == 0 {
 		t.Fatal("empty encoded response")
 	}
-	if ptr != unsafe.Pointer(&output[0]) {
-		t.Fatal("response pointer does not reference output buffer")
+	wantOffset := uint32(uintptr(unsafe.Pointer(&output[0])))
+	if offset != wantOffset {
+		t.Fatalf("response offset = %d, want %d", offset, wantOffset)
 	}
-
-	var response wasmhttp.Response
-	if err := json.Unmarshal(output[:size], &response); err != nil {
+	response, err := wasmhttp.DecodeResponse(output[:size])
+	if err != nil {
 		t.Fatal(err)
 	}
 	if response.Status != http.StatusCreated {
